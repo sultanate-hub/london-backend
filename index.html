@@ -148,6 +148,7 @@
     <div class="nav-actions">
       <div class="chip"><span class="dot"></span><span>Network Live</span></div>
       <button class="btn" onclick="refreshAll()"><i class="fa-solid fa-rotate"></i> Refresh</button>
+      <button class="btn" id="contactToggleBtn" onclick="toggleContact()"><i class="fa-solid fa-mobile-screen"></i> <span id="contactLabel">Phone</span></button>
       <button class="btn" onclick="openProvider()"><i class="fa-solid fa-credit-card"></i> <span id="provLabel">Provider</span></button>
       <button class="btn btn-danger" onclick="logout()"><i class="fa-solid fa-right-from-bracket"></i> <span>Logout</span></button>
     </div>
@@ -268,6 +269,7 @@
 const API='https://pvslxeakzyhxfzlqakqg.supabase.co/functions/v1/hotspot';
 let sid=localStorage.getItem('dh_sid')||'';
 let page=1, filter='all', extId=null;
+let contactMethod='phone';
 const $=id=>document.getElementById(id);
 const money=n=>'₦'+(Number(n)||0).toLocaleString('en-NG');
 function fmtDT(s){return s?new Date(s).toLocaleString('en-NG',{year:'numeric',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',hour12:true}):'—';}
@@ -299,7 +301,7 @@ async function login(){
 }
 function logout(){sid='';localStorage.removeItem('dh_sid');$('app').classList.add('hidden');$('login').classList.remove('hidden');}
 function showApp(){$('login').classList.add('hidden');$('app').classList.remove('hidden');}
-function loadAll(){loadStats();loadUsers(1);loadProvider();}
+function loadAll(){loadStats();loadUsers(1);loadProvider();loadContact();}
 function refreshAll(){loadAll();toast('Refreshed');}
 function tick(){const d=new Date();$('clock').textContent='Server Time: '+d.toLocaleTimeString();}
 setInterval(tick,1000);tick();
@@ -413,6 +415,9 @@ async function showSessions(){
 }
 async function forceLogout(){if(!confirm('Log out all other admin sessions?'))return;const d=await api('/admin/api/force-logout',{method:'POST',body:JSON.stringify({sessionId:sid})});toast(d.message||d.error);closeModal('sessionsModal');}
 async function loadProvider(){const d=await api('/admin/api/provider?sessionId='+sid);if(d.success){$('provider').value=d.provider;$('provLabel').textContent=d.provider.charAt(0).toUpperCase()+d.provider.slice(1);}}
+function applyContactLabel(){const l=$('contactLabel');if(l)l.textContent=(contactMethod==='email')?'Email':'Phone';const ic=document.querySelector('#contactToggleBtn i');if(ic)ic.className='fa-solid '+((contactMethod==='email')?'fa-envelope':'fa-mobile-screen');}
+async function loadContact(){try{const d=await api('/admin/api/contact-method?sessionId='+sid);if(d&&d.success){contactMethod=d.method;applyContactLabel();}}catch(e){}}
+async function toggleContact(){const next=(contactMethod==='phone')?'email':'phone';const d=await api('/admin/api/contact-method',{method:'POST',body:JSON.stringify({sessionId:sid,method:next})});if(d&&d.success){contactMethod=d.method;applyContactLabel();toast('Purchases now require '+(contactMethod==='email'?'email':'phone number'));}else{toast((d&&d.error)||'Failed');}}
 function openProvider(){$('providerModal').classList.add('open');}
 async function saveProvider(){const d=await api('/admin/api/provider',{method:'POST',body:JSON.stringify({sessionId:sid,provider:$('provider').value})});toast(d.success?('Provider: '+d.provider):(d.error||''));closeModal('providerModal');loadProvider();}
 // add a sessions shortcut into the Refresh area: click on "Network Live"

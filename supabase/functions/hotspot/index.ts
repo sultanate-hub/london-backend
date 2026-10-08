@@ -121,7 +121,7 @@ async function logActivity(
 // the real phone is stored on the order and in provider metadata.
 function contactEmail(email?: string, phone?: string): string {
   if (email) return email;
-  if (phone) return `${phone.replace(/[^0-9]/g, "")}@phone.dreamhatcher.ink`;
+  if (phone) return `${phone.replace(/[^0-9]/g, "")}@dh.ink`;
   return "customer@dreamhatcher.com";
 }
 
@@ -184,6 +184,17 @@ async function getActiveProvider(): Promise<string> {
   return fallback;
 }
 
+// Which contact field the customer portal should collect: "phone" or "email".
+// Controlled from the admin dashboard; defaults to phone.
+async function getContactMethod(): Promise<string> {
+  try {
+    const { data } = await getSupabase().from("app_settings").select("value").eq("key", "contact_method").maybeSingle();
+    const v = String(data?.value || "").toLowerCase();
+    if (v === "phone" || v === "email") return v;
+  } catch (_) { /* ignore */ }
+  return "phone";
+}
+
 async function initPayment(args: { email?: string; phone?: string; amount: number; plan: string; mac?: string }) {
   const provider = await getActiveProvider();
   return provider === "paystack" ? await initPaystack(args) : await initSquad(args);
@@ -200,7 +211,7 @@ async function enqueue(
   const expiresAt = expiryFromPlan(planCode);
   await supabase.from("payment_queue").insert({
     transaction_id: ref,
-    customer_email: email || "unknown@example.com",
+    customer_email: email || phone || "unknown@example.com",
     customer_phone: phone || "",
     plan: planCode,
     mikrotik_username: username,
@@ -461,7 +472,7 @@ async function poll(){
       document.getElementById('pl').textContent=d.plan;document.getElementById('ex').textContent=d.expires_at?new Date(d.expires_at).toLocaleString():'';
       document.getElementById('loading').className='h';document.getElementById('creds').className='h';document.getElementById('t').textContent='Your credentials';
       document.getElementById('sp').style.display='none';
-      setTimeout(go,4000);return;}
+      setTimeout(go,5000);return;}
   }catch(e){}
   if(c>=20){document.getElementById('err').className='h';document.getElementById('err').classList.remove('h');document.getElementById('loading').className='h';return;}
   document.getElementById('msg').textContent=d?.message||'Waiting for your account...';
@@ -571,7 +582,7 @@ serve(async (req: Request) => {
         if (!planCode) return json({ error: "Invalid amount" }, 400);
         const ex = await getSupabase().from("payment_queue").select("id").eq("transaction_id", ref).limit(1);
         if (ex.data && ex.data.length > 0) return json({ received: true });
-        await enqueue({ ref, email: Body.email, phone: meta.phone || "", planCode, mac, provider: "Squad" });
+        await enqueue({ ref, email: meta.phone ? "" : Body.email, phone: meta.phone || "", planCode, mac, provider: "Squad" });
         return json({ received: true });
       } catch (e) {
         console.error("squad webhook error", e);
@@ -600,7 +611,7 @@ serve(async (req: Request) => {
         if (!planCode) return json({ error: "Invalid amount" }, 400);
         const ex = await getSupabase().from("payment_queue").select("id").eq("transaction_id", ref).limit(1);
         if (ex.data && ex.data.length > 0) return json({ received: true });
-        await enqueue({ ref, email: d.customer?.email, phone: meta.phone || d.customer?.phone || "", planCode, mac, provider: "Paystack" });
+        await enqueue({ ref, email: meta.phone ? "" : d.customer?.email, phone: meta.phone || d.customer?.phone || "", planCode, mac, provider: "Paystack" });
         return json({ received: true });
       } catch (e) {
         console.error("paystack webhook error", e);
@@ -631,6 +642,7 @@ serve(async (req: Request) => {
     if (path === "/api/check-email" && method === "GET") return await checkEmail(queryParams(req).get("email") || "");
     if (path === "/api/check-phone" && method === "GET") return await checkPhone(queryParams(req).get("phone") || "");
     if (path === "/api/check-mac" && method === "GET") return await checkMac(queryParams(req).get("mac") || "");
+    if (path === "/api/contact-method" && method === "GET") return json({ method: await getContactMethod() });
 
     if (path === "/health" && method === "GET") {
       const provider = await getActiveProvider();
