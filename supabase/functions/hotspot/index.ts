@@ -121,7 +121,7 @@ async function logActivity(
 // the real phone is stored on the order and in provider metadata.
 function contactEmail(email?: string, phone?: string): string {
   if (email) return email;
-  if (phone) return `${phone.replace(/[^0-9]/g, "")}@dh.ink`;
+  if (phone) return `${phone.replace(/[^0-9]/g, "")}@dreamhatcher.ink`;
   return "customer@dreamhatcher.com";
 }
 
