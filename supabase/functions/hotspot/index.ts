@@ -527,7 +527,12 @@ serve(async (req: Request) => {
       const email = q.get("email") || undefined;
       const phone = q.get("phone") || undefined;
       if (!selected) return html(errorPage("Invalid plan selected"), 400);
-      if (!email && !phone) return html(errorPage("Email address or phone number is required to complete purchase."), 400);
+      const method = await getContactMethod();
+      if (method === "email") {
+        if (!email) return html(errorPage("An email address is required to complete this purchase."), 400);
+      } else {
+        if (!phone) return html(errorPage("A phone number is required to complete this purchase."), 400);
+      }
       try {
         const { checkoutUrl, paymentReference } = await initPayment({ email, phone, amount: selected.amount, plan: selected.code, mac });
         await logActivity("pay", `💵 Payment [${await getActiveProvider()}]: ${plan} | MAC: ${mac} | ${email ? ("Email: " + email) : ("Phone: " + phone)} | Ref: ${paymentReference}`, { ref: paymentReference, mac, level: "payment" });
