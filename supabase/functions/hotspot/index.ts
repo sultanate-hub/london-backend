@@ -116,9 +116,18 @@ async function logActivity(
   } catch (_) { /* never fail the main flow for logging */ }
 }
 
+// Payment providers require a valid email address. If the customer only gave a
+// phone number, we synthesise a placeholder email so the charge can proceed;
+// the real phone is stored on the order and in provider metadata.
+function contactEmail(email?: string, phone?: string): string {
+  if (email) return email;
+  if (phone) return `${phone.replace(/[^0-9]/g, "")}@phone.local`;
+  return "customer@dreamhatcher.com";
+}
+
 // ---------- payment providers ----------
 async function initSquad(
-  { email, amount, plan, mac }: { email?: string; amount: number; plan: string; mac?: string },
+  { email, phone, amount, plan, mac }: { email?: string; phone?: string; amount: number; plan: string; mac?: string },
 ): Promise<{ checkoutUrl: string; paymentReference: string }> {
   const base = Deno.env.get("SQUAD_BASE_URL") || "https://api-d.squadco.com";
   const secret = Deno.env.get("SQUAD_SECRET_KEY")!;
@@ -128,14 +137,14 @@ async function initSquad(
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${secret}` },
     body: JSON.stringify({
       amount: Math.round(amount * 100),
-      email: email || "customer@dreamhatcher.com",
+      email: contactEmail(email, phone),
       currency: "NGN",
       initiate_type: "inline",
       transaction_ref: reference,
       customer_name: "WiFi Customer",
       callback_url: `${PUBLIC_BASE}/squad-callback`,
       payment_channels: ["card", "bank", "ussd", "transfer"],
-      metadata: { mac_address: mac || "unknown", plan },
+      metadata: { mac_address: mac || "unknown", plan, phone: phone || "" },
       pass_charge: false,
     }),
   });
@@ -144,7 +153,7 @@ async function initSquad(
 }
 
 async function initPaystack(
-  { email, amount, plan, mac }: { email?: string; amount: number; plan: string; mac?: string },
+  { email, phone, amount, plan, mac }: { email?: string; phone?: string; amount: number; plan: string; mac?: string },
 ): Promise<{ checkoutUrl: string; paymentReference: string }> {
   const secret = Deno.env.get("PAYSTACK_SECRET_KEY")!;
   const res = await fetch("https://api.paystack.co/transaction/initialize", {
@@ -152,10 +161,10 @@ async function initPaystack(
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${secret}` },
     body: JSON.stringify({
       amount: Math.round(amount * 100),
-      email: email || "customer@dreamhatcher.com",
+      email: contactEmail(email, phone),
       currency: "NGN",
       callback_url: `${PUBLIC_BASE}/paystack-callback`,
-      metadata: { mac_address: mac || "unknown", plan },
+      metadata: { mac_address: mac || "unknown", plan, phone: phone || "" },
     }),
   });
   const data = await res.json();
@@ -175,7 +184,7 @@ async function getActiveProvider(): Promise<string> {
   return fallback;
 }
 
-async function initPayment(args: { email?: string; amount: number; plan: string; mac?: string }) {
+async function initPayment(args: { email?: string; phone?: string; amount: number; plan: string; mac?: string }) {
   const provider = await getActiveProvider();
   return provider === "paystack" ? await initPaystack(args) : await initSquad(args);
 }
@@ -390,6 +399,29 @@ async function checkEmail(email: string): Promise<Response> {
   });
 }
 
+async function checkPhone(phoneRaw: string): Promise<Response> {
+  const phone = (phoneRaw || "").replace(/[^0-9]/g, "");
+  if (!phone) return json({ error: "Phone required" }, 400);
+  const { data } = await getSupabase()
+    .from("payment_queue")
+    .select("mikrotik_username, mikrotik_password, plan, expires_at, one_time_token")
+    .eq("customer_phone", phone)
+    .eq("status", "processed")
+    .gt("expires_at", new Date().toISOString())
+    .order("created_at", { ascending: false })
+    .limit(1);
+  const row = data?.[0];
+  if (!row) return json({ found: false, message: "No active account for this phone number." });
+  return json({
+    found: true,
+    username: row.mikrotik_username,
+    password: row.mikrotik_password,
+    plan: row.plan,
+    expires_at: row.expires_at,
+    token: row.one_time_token,
+  });
+}
+
 // ---------- success page ----------
 function successPage(ref: string): string {
   return `<!DOCTYPE html><html><head><meta charset="UTF-8">
@@ -482,11 +514,12 @@ serve(async (req: Request) => {
       const q = queryParams(req);
       const mac = q.get("mac") || "unknown";
       const email = q.get("email") || undefined;
+      const phone = q.get("phone") || undefined;
       if (!selected) return html(errorPage("Invalid plan selected"), 400);
-      if (!email) return html(errorPage("Email address is required to complete purchase."), 400);
+      if (!email && !phone) return html(errorPage("Email address or phone number is required to complete purchase."), 400);
       try {
-        const { checkoutUrl, paymentReference } = await initPayment({ email, amount: selected.amount, plan: selected.code, mac });
-        await logActivity("pay", `💵 Payment [${await getActiveProvider()}]: ${plan} | MAC: ${mac} | Email: ${email} | Ref: ${paymentReference}`, { ref: paymentReference, mac, level: "payment" });
+        const { checkoutUrl, paymentReference } = await initPayment({ email, phone, amount: selected.amount, plan: selected.code, mac });
+        await logActivity("pay", `💵 Payment [${await getActiveProvider()}]: ${plan} | MAC: ${mac} | ${email ? ("Email: " + email) : ("Phone: " + phone)} | Ref: ${paymentReference}`, { ref: paymentReference, mac, level: "payment" });
         return new Response(null, { status: 302, headers: { Location: checkoutUrl } });
       } catch (e) {
         console.error("payment init error", e);
@@ -496,16 +529,17 @@ serve(async (req: Request) => {
 
     if (path === "/api/initialize-payment" && method === "POST") {
       const body = await req.json().catch(() => ({}));
-      const { email, amount, plan, mac_address } = body as Record<string, unknown>;
+      const { email, phone, amount, plan, mac_address } = body as Record<string, unknown>;
       if (!amount || !plan) return json({ error: "Missing amount or plan" }, 400);
       try {
         const { checkoutUrl, paymentReference } = await initPayment({
           email: email as string,
+          phone: phone as string,
           amount: Number(amount),
           plan: String(plan),
           mac: mac_address as string,
         });
-        await logActivity("pay", `💵 Payment [${await getActiveProvider()}]: ${plan} | MAC: ${mac_address} | Email: ${email} | Ref: ${paymentReference}`, { ref: paymentReference, mac: String(mac_address || ""), level: "payment" });
+        await logActivity("pay", `💵 Payment [${await getActiveProvider()}]: ${plan} | MAC: ${mac_address} | ${email ? ("Email: " + email) : ("Phone: " + phone)} | Ref: ${paymentReference}`, { ref: paymentReference, mac: String(mac_address || ""), level: "payment" });
         return json({ success: true, checkout_url: checkoutUrl, payment_reference: paymentReference });
       } catch (e) {
         console.error("initialize error", e);
@@ -537,7 +571,7 @@ serve(async (req: Request) => {
         if (!planCode) return json({ error: "Invalid amount" }, 400);
         const ex = await getSupabase().from("payment_queue").select("id").eq("transaction_id", ref).limit(1);
         if (ex.data && ex.data.length > 0) return json({ received: true });
-        await enqueue({ ref, email: Body.email, phone: "", planCode, mac, provider: "Squad" });
+        await enqueue({ ref, email: Body.email, phone: meta.phone || "", planCode, mac, provider: "Squad" });
         return json({ received: true });
       } catch (e) {
         console.error("squad webhook error", e);
@@ -566,7 +600,7 @@ serve(async (req: Request) => {
         if (!planCode) return json({ error: "Invalid amount" }, 400);
         const ex = await getSupabase().from("payment_queue").select("id").eq("transaction_id", ref).limit(1);
         if (ex.data && ex.data.length > 0) return json({ received: true });
-        await enqueue({ ref, email: d.customer?.email, phone: d.customer?.phone || "", planCode, mac, provider: "Paystack" });
+        await enqueue({ ref, email: d.customer?.email, phone: meta.phone || d.customer?.phone || "", planCode, mac, provider: "Paystack" });
         return json({ received: true });
       } catch (e) {
         console.error("paystack webhook error", e);
@@ -595,6 +629,7 @@ serve(async (req: Request) => {
     if (path === "/api/get-token" && method === "GET") return await getToken(queryParams(req).get("ref") || "");
     if (path === "/api/check-token" && method === "GET") return await checkToken(req);
     if (path === "/api/check-email" && method === "GET") return await checkEmail(queryParams(req).get("email") || "");
+    if (path === "/api/check-phone" && method === "GET") return await checkPhone(queryParams(req).get("phone") || "");
     if (path === "/api/check-mac" && method === "GET") return await checkMac(queryParams(req).get("mac") || "");
 
     if (path === "/health" && method === "GET") {
