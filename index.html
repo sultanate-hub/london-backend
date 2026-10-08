@@ -303,6 +303,7 @@ function loadAll(){loadStats();loadUsers(1);loadProvider();}
 function refreshAll(){loadAll();toast('Refreshed');}
 function tick(){const d=new Date();$('clock').textContent='Server Time: '+d.toLocaleTimeString();}
 setInterval(tick,1000);tick();
+setInterval(()=>{if(sid&&!document.querySelector('.modal-overlay.open')){loadStats();loadUsers(page);}},60000);
 async function loadStats(){
   const d=await api('/admin/api/stats?sessionId='+sid);if(!d.success)return;const s=d.data;
   let sessions=0;
@@ -326,6 +327,8 @@ async function loadStats(){
     <div class="metric-label">${c.label}</div>
     ${c.footer?`<div class="metric-footer">${c.footer}</div>`:''}</div>`).join('');
 }
+function effStatus(u){return (u.status==='processed'&&u.expires_at&&new Date(u.expires_at)<=new Date())?'expired':u.status;}
+function statusLabel(s){return ({processed:'ACTIVE',pending:'PENDING',expired:'EXPIRED'})[s]||(s||'').toUpperCase();}
 function setFilter(f){filter=f;document.querySelectorAll('.filter-tab').forEach(t=>t.classList.toggle('active',t.dataset.f===f));loadUsers(1);}
 async function loadUsers(p){
   if(p<1)p=1;page=p;
@@ -339,7 +342,7 @@ async function loadUsers(p){
     <td><div class="username">${u.mikrotik_username||''}</div><div class="user-email">${u.customer_email||''}</div></td>
     <td class="password-cell">${u.mikrotik_password||''}</td>
     <td><span class="plan-tag tag-${u.plan||'24hr'}">${u.plan||'—'}</span></td>
-    <td><span class="badge badge-${u.status}">${(u.status||'').toUpperCase()}</span></td>
+    <td><span class="badge badge-${effStatus(u)}">${statusLabel(effStatus(u))}</span></td>
     <td class="mono" style="color:var(--text-muted);font-size:12px">${u.mac_address||''}</td>
     <td class="user-email">${fmtDT(u.expires_at)}</td>
     <td style="text-align:right;white-space:nowrap"><button class="btn" style="padding:6px 12px" onclick="openExtend(${u.id},'${u.mikrotik_username}')"><i class="fa-solid fa-clock-rotate-left"></i></button>
