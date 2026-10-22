@@ -1,6 +1,7 @@
 // Admin API for the hotspot backend (stateless — sessions live in admin_logs).
 import { json, queryParams } from "./cors.ts";
 import { getSupabase } from "./supabase.ts";
+import { dateKey, revenueByDay, revenueByMonth, sumRevenue, type RevenueRow } from "./revenue.ts";
 
 const SESSION_TIMEOUT = 5 * 60 * 1000;
 
@@ -58,6 +59,23 @@ async function readJson(req: Request): Promise<Record<string, unknown>> {
   return await req.json().catch(() => ({}));
 }
 
+async function fetchRevenueRows(sb: any): Promise<RevenueRow[]> {
+  const page = 1000;
+  let rows: RevenueRow[] = [];
+  let from = 0;
+  while (true) {
+    const { data, error } = await sb.from("payment_queue")
+      .select("plan, created_at")
+      .order("created_at", { ascending: true })
+      .range(from, from + page - 1);
+    if (error) throw new Error(error.message);
+    rows = rows.concat((data ?? []) as RevenueRow[]);
+    if (!data || data.length < page) break;
+    from += page;
+  }
+  return rows;
+}
+
 export async function handleAdmin(req: Request, path: string): Promise<Response> {
   const method = req.method;
   const q = queryParams(req);
@@ -92,17 +110,31 @@ export async function handleAdmin(req: Request, path: string): Promise<Response>
   }
 
   if (path === "/admin/api/stats" && method === "GET") {
-    const { data, error } = await getSupabase().rpc("admin_stats");
+    const sb = getSupabase();
+    const { data, error } = await sb.rpc("admin_stats");
     if (error) return json({ error: error.message }, 500);
-    return json({ success: true, data });
+    const stats: any = Array.isArray(data) ? data[0] : data;
+    if (!stats) return json({ error: "Stats unavailable" }, 500);
+    const rows = await fetchRevenueRows(sb);
+    const today = dateKey(new Date());
+    stats.revenue_lifetime = sumRevenue(rows);
+    stats.total_revenue_lifetime = stats.revenue_lifetime;
+    stats.revenue_today = sumRevenue(rows, today);
+    stats.revenue_week = sumRevenue(rows, dateKey(new Date(Date.now() - 6 * 86400000)));
+    stats.revenue_month = sumRevenue(rows, dateKey(new Date(Date.now() - 29 * 86400000)));
+    return json({ success: true, data: stats });
   }
 
   if (path === "/admin/api/daily" && method === "GET") {
     const month = q.get("month") || "";
     if (!/^\d{4}-\d{2}$/.test(month)) return json({ error: "Invalid month format. Use YYYY-MM." }, 400);
-    const { data, error } = await getSupabase().rpc("admin_daily", { p_month: month });
+    const sb = getSupabase();
+    const { data, error } = await sb.rpc("admin_daily", { p_month: month });
     if (error) return json({ error: error.message }, 500);
-    return json({ success: true, data, month });
+    const rows = await fetchRevenueRows(sb);
+    const map = revenueByDay(rows, month);
+    const out = (data ?? []).map((r: any) => ({ ...r, daily_total: map[Number(r.day)] ?? 0 }));
+    return json({ success: true, data: out, month });
   }
 
   if (path === "/admin/api/activity" && method === "GET") {
@@ -119,9 +151,16 @@ export async function handleAdmin(req: Request, path: string): Promise<Response>
   }
 
   if (path === "/admin/api/monthly" && method === "GET") {
-    const { data, error } = await getSupabase().rpc("admin_monthly");
+    const sb = getSupabase();
+    const { data, error } = await sb.rpc("admin_monthly");
     if (error) return json({ error: error.message }, 500);
-    return json({ success: true, data });
+    const rows = await fetchRevenueRows(sb);
+    const map = revenueByMonth(rows);
+    const out = (data ?? []).map((r: any) => {
+      const key = String(r.month_raw ?? r.month ?? (r.month_start ? String(r.month_start).slice(0, 7) : ""));
+      return { ...r, revenue: map[key] ?? 0 };
+    });
+    return json({ success: true, data: out });
   }
 
   if (path === "/admin/api/users" && method === "GET") {
@@ -131,7 +170,7 @@ export async function handleAdmin(req: Request, path: string): Promise<Response>
     const perPage = 100;
     const from = (page - 1) * perPage;
     let query = getSupabase().from("payment_queue")
-      .select("id, mikrotik_username, mikrotik_password, plan, status, mac_address, customer_email, expires_at, created_at", { count: "exact" })
+      .select("id, transaction_id, mikrotik_username, mikrotik_password, plan, status, mac_address, customer_email, expires_at, created_at", { count: "exact" })
       .order("created_at", { ascending: false })
       .range(from, from + perPage - 1);
     if (status && status !== "all") query = query.eq("status", status);

@@ -32,6 +32,7 @@ import {
 } from "../_shared/cors.ts";
 import { getSupabase } from "../_shared/supabase.ts";
 import { handleAdmin } from "../_shared/admin.ts";
+import { syncMikhmonUsers } from "../_shared/mikhmon.ts";
 
 const PUBLIC_BASE = Deno.env.get("PUBLIC_BASE_URL") ||
   "https://pvslxeakzyhxfzlqakqg.supabase.co/functions/v1/hotspot";
@@ -240,6 +241,38 @@ function checkApiKey(req: Request): boolean {
   const key = req.headers.get("x-api-key") || queryParams(req).get("api_key");
   const expected = Deno.env.get("MIKROTIK_API_KEY") || "";
   return !!expected && key === expected;
+}
+
+async function mikhmonSync(req: Request): Promise<Response> {
+  const body = await req.json().catch(() => null);
+  if (!body || !Array.isArray(body.users)) {
+    return json({ success: false, error: "users array required" }, 400);
+  }
+  if (body.mode !== "first-login") {
+    return json({ success: false, error: "mode=first-login required" }, 400);
+  }
+  const active = Array.isArray(body.active) ? body.active.map(String) : [];
+  const dryRun = queryParams(req).get("dry") === "1";
+  try {
+    const result = await syncMikhmonUsers(getSupabase(), body.users, {
+      dryRun,
+      firstLoginOnly: true,
+      active,
+    });
+    const changed = result.created + result.updated + result.failed;
+    if (!dryRun && changed > 0) {
+      await logActivity(
+        "mikhmon",
+        `Mikhmon sync: ${result.created} new, ${result.updated} updated, ${result.skipped} not yet logged in, ${result.failed} failed, ${result.unchanged} unchanged`,
+        { level: "mikhmon" },
+      );
+    }
+    return json({ success: true, dry: dryRun, ...result });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Mikhmon sync failed";
+    console.error("Mikhmon sync error:", message);
+    return json({ success: false, error: message }, 500);
+  }
 }
 
 async function mikrotikQueueText(): Promise<Response> {
@@ -501,6 +534,10 @@ serve(async (req: Request) => {
     if (path.startsWith("/admin/api/")) return await handleAdmin(req, path);
 
     // ---- router-facing (x-api-key) ----
+    if (path === "/api/mikhmon-sync" && method === "POST") {
+      if (!checkApiKey(req)) return text("FORBIDDEN", 403);
+      return await mikhmonSync(req);
+    }
     if (path === "/api/mikrotik-queue-text" && method === "GET") {
       if (!checkApiKey(req)) return text("FORBIDDEN", 403);
       return await mikrotikQueueText();

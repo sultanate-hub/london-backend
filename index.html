@@ -60,6 +60,9 @@
   td{padding:16px 24px;border-bottom:1px solid var(--border);font-size:14px;vertical-align:middle}
   tbody tr{transition:background .15s}
   tbody tr:hover{background:rgba(16,185,129,.04)}
+  tbody tr[data-source="mikhmon"] td{background:rgba(37,99,235,.30)}
+  tbody tr[data-source="mikhmon"]:hover td{background:rgba(37,99,235,.42)}
+  tbody tr[data-source="mikhmon"] td:first-child{box-shadow:inset 4px 0 0 #3b82f6}
   .username{font-weight:700;margin-bottom:4px}
   .user-email{font-size:12px;color:var(--text-secondary);word-break:break-word}
   .password-cell{font-family:'JetBrains Mono',monospace;font-size:13px;white-space:nowrap;overflow-x:auto;max-width:150px}
@@ -281,8 +284,10 @@ let page=1, filter='all', extId=null;
 let contactMethod='phone';
 const $=id=>document.getElementById(id);
 const money=n=>'₦'+(Number(n)||0).toLocaleString('en-NG');
-function fmtDT(s){return s?new Date(s).toLocaleString('en-NG',{year:'numeric',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',hour12:true}):'—';}
-function fmtT(s){return s?new Date(s).toLocaleTimeString('en-NG',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:true}):'—';}
+const LAGOS_TZ='Africa/Lagos';
+function fmtDT(s){return s?new Date(s).toLocaleString('en-NG',{timeZone:LAGOS_TZ,year:'numeric',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',hour12:true}):'-';}
+function fmtT(s){return s?new Date(s).toLocaleTimeString('en-NG',{timeZone:LAGOS_TZ,hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:true}):'-';}
+function lagosMonth(){const p=new Intl.DateTimeFormat('en-CA',{timeZone:LAGOS_TZ,year:'numeric',month:'2-digit'}).formatToParts(new Date());const g=t=>p.find(x=>x.type===t)?.value||'';return g('year')+'-'+g('month');}
 const MONTHS=['January','February','March','April','May','June','July','August','September','October','November','December'];
 function monthName(ym){const p=String(ym).split('-');return (MONTHS[parseInt(p[1],10)-1]||p[1]||'')+' '+(p[0]||'');}
 function toast(m){const t=$('toast');t.textContent=m;t.style.display='block';setTimeout(()=>t.style.display='none',2600);}
@@ -312,7 +317,7 @@ function logout(){sid='';localStorage.removeItem('dh_sid');$('app').classList.ad
 function showApp(){$('login').classList.add('hidden');$('app').classList.remove('hidden');}
 function loadAll(){loadStats();loadUsers(1);loadProvider();loadContact();}
 function refreshAll(){loadAll();toast('Refreshed');}
-function tick(){const d=new Date();$('clock').textContent='Server Time: '+d.toLocaleTimeString();}
+function tick(){const d=new Date();$('clock').textContent='Lagos Time: '+d.toLocaleTimeString('en-NG',{timeZone:LAGOS_TZ,hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:true});}
 setInterval(tick,1000);tick();
 setInterval(()=>{if(sid&&!document.querySelector('.modal-overlay.open')){loadStats();loadUsers(page);}},60000);
 async function loadStats(){
@@ -349,7 +354,7 @@ async function loadUsers(p){
   $('pageInfo').innerHTML=d.total?`Showing <strong>${start}–${end}</strong> of <strong>${d.total}</strong> clients`:'No clients';
   $('prevBtn').classList.toggle('disabled',d.page<=1);
   $('nextBtn').classList.toggle('disabled',end>=d.total);
-  $('users').innerHTML=d.data.map(u=>`<tr>
+  $('users').innerHTML=d.data.map(u=>{const isM=String(u.transaction_id||'').startsWith('mikhmon-');return `<tr data-source="${isM?'mikhmon':'auto'}">
     <td><div class="username">${u.mikrotik_username||''}</div><div class="user-email">${u.customer_email||''}</div></td>
     <td class="password-cell">${u.mikrotik_password||''}</td>
     <td><span class="plan-tag tag-${u.plan||'24hr'}">${u.plan||'—'}</span></td>
@@ -358,7 +363,7 @@ async function loadUsers(p){
     <td class="user-email">${fmtDT(u.expires_at)}</td>
     <td style="text-align:right;white-space:nowrap"><button class="btn" style="padding:6px 12px" onclick="openExtend(${u.id},'${u.mikrotik_username}')"><i class="fa-solid fa-clock-rotate-left"></i></button>
     <button class="btn btn-danger" style="padding:6px 12px" onclick="del(${u.id})"><i class="fa-solid fa-trash"></i></button></td>
-  </tr>`).join('')||'<tr><td colspan="7" style="text-align:center;padding:40px;color:var(--text-muted)">No clients found</td></tr>';
+  </tr>`}).join('')||'<tr><td colspan="7" style="text-align:center;padding:40px;color:var(--text-muted)">No clients found</td></tr>';
 }
 $('search')?.addEventListener('keydown',e=>{if(e.key==='Enter')loadUsers(1);});
 function openExtend(id,name){extId=id;$('extendUser').textContent=name;$('extendModal').classList.add('open');}
@@ -381,7 +386,7 @@ function renderMonthly(year){
   const rows=allMonths.filter(m=>year==='ALL'||String(m.month).startsWith(year));
   $('monthly').innerHTML=rows.length?rows.map(m=>`<tr style="cursor:pointer" onclick="selectMonth('${m.month}')"><td>${monthName(m.month)}</td><td style="text-align:right;color:var(--gold)">${money(m.revenue)}</td></tr>`).join(''):'<tr><td colspan="2" style="text-align:center;padding:20px;color:var(--text-muted)">No revenue yet</td></tr>';
 }
-function returnToCurrentMonth(){selectMonth(new Date().toISOString().slice(0,7));}
+function returnToCurrentMonth(){selectMonth(lagosMonth());}
 async function selectMonth(m){
   $('currentMonthLabel').textContent=monthName(m);
   const d=await api('/admin/api/daily?sessionId='+sid+'&month='+m);if(!d.success)return;
