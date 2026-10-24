@@ -257,6 +257,18 @@
   </div>
 </div>
 
+<!-- POS clients modal -->
+<div class="modal-overlay" id="posModal">
+  <div class="modal-box" style="max-width:900px">
+    <div class="modal-header"><h3 class="modal-title"><i class="fa-solid fa-store"></i> Connected POS Clients</h3><button class="modal-close" onclick="closeModal('posModal')">&times;</button></div>
+    <div class="modal-body">
+      <div class="mut" id="posMeta" style="margin-bottom:12px"></div>
+      <div class="table-wrap"><table><thead><tr><th>IP Address</th><th>MAC Address</th><th>Hostname</th><th>Last Seen</th></tr></thead><tbody id="posRows"></tbody></table></div>
+    </div>
+    <div class="modal-footer"><button class="btn" onclick="closeModal('posModal')">Close</button></div>
+  </div>
+</div>
+
 <!-- Contact method modal -->
 <div class="modal-overlay" id="contactModal">
   <div class="modal-box" style="max-width:420px">
@@ -295,6 +307,7 @@ function openModal(id){$(id).classList.add('open');}
 function closeModal(id){$(id).classList.remove('open');if(id==='activityModal'&&activityTimer){clearInterval(activityTimer);activityTimer=null;}}
 function setRole(username,role){$('who').textContent=username;const c=$('roleChip');c.textContent=role==='super_admin'?'SUPER ADMIN':'ADMIN';c.style.background=role==='super_admin'?'var(--gold-soft)':'var(--accent-soft)';c.style.color=role==='super_admin'?'var(--gold)':'var(--accent)';}
 let idleTimer=null;
+let posClients=[];
 function resetIdle(){clearTimeout(idleTimer);idleTimer=setTimeout(()=>{if(sid){toast('Logged out after 5 minutes of inactivity');logout();}},5*60*1000);}
 ['mousemove','keydown','click','scroll','touchstart'].forEach(e=>document.addEventListener(e,resetIdle,true));
 async function api(path,opts={}){
@@ -322,6 +335,7 @@ setInterval(tick,1000);tick();
 setInterval(()=>{if(sid&&!document.querySelector('.modal-overlay.open')){loadStats();loadUsers(page);}},60000);
 async function loadStats(){
   const d=await api('/admin/api/stats?sessionId='+sid);if(!d.success)return;const s=d.data;
+  const pos=s.pos||{connected:0,total:0,week:0,month:0,clients:[]};posClients=Array.isArray(pos.clients)?pos.clients:[];
   let sessions=0;
   try{const l=await api('/admin/api/sessions?sessionId='+sid);if(l.success)sessions=l.active;}catch(e){}
   let activityCount=0;
@@ -331,9 +345,10 @@ async function loadStats(){
     {v:money(s.revenue_today),label:"Today's Revenue",ic:'fa-calendar-day',c:'var(--cyan)',bg:'var(--cyan-bg)',tag:'TODAY',currency:true,footer:`<i class="fa-solid fa-user-plus"></i> ${s.signups_today} signups today`},
     {v:s.processed,label:'Currently Active Users',ic:'fa-users',c:'var(--success)',bg:'var(--success-bg)',tag:'ACTIVE',footer:`<span style="color:var(--danger)"><i class="fa-solid fa-xmark"></i> ${s.expired} expired</span><span style="color:var(--warning);margin-left:12px"><i class="fa-solid fa-clock"></i> ${s.pending} pending</span>`},
     {v:sessions,label:'Active Admin Sessions',ic:'fa-user-shield',c:'var(--purple)',bg:'var(--purple-bg)',tag:'SESSIONS',click:'showSessions()'},
-    {v:money(s.revenue_week),label:'This Week',ic:'fa-calendar-week',c:'var(--warning)',bg:'var(--warning-bg)',tag:'7 days',currency:true},
-    {v:money(s.revenue_month),label:'This Month',ic:'fa-calendar-days',c:'var(--accent)',bg:'var(--accent-soft)',tag:'30 days',currency:true},
-    {v:s.total_users,label:'Total Clients',ic:'fa-address-book',c:'var(--cyan)',bg:'var(--cyan-bg)',tag:'All time'},
+    {v:money(s.revenue_week),label:'This Week',ic:'fa-calendar-week',c:'var(--warning)',bg:'var(--warning-bg)',tag:'7 days',currency:true,footer:`<i class="fa-solid fa-store"></i> POS seen: <strong>${pos.week}</strong>`},
+    {v:money(s.revenue_month),label:'This Month',ic:'fa-calendar-days',c:'var(--accent)',bg:'var(--accent-soft)',tag:'30 days',currency:true,footer:`<i class="fa-solid fa-store"></i> POS seen: <strong>${pos.month}</strong>`},
+    {v:s.total_users,label:'Total Clients',ic:'fa-address-book',c:'var(--cyan)',bg:'var(--cyan-bg)',tag:'All time',footer:`<i class="fa-solid fa-store"></i> POS: <strong>${pos.connected}</strong> connected · <strong>${pos.total}</strong> all-time`},
+    {v:pos.connected,label:'POS Clients',ic:'fa-store',c:'var(--gold)',bg:'var(--gold-soft)',tag:'CONNECTED',click:'openPos()',footer:`All-time <strong>${pos.total}</strong> · 7d <strong>${pos.week}</strong> · 30d <strong>${pos.month}</strong>`},
     {v:activityCount,label:'Live Activity',ic:'fa-wave-square',c:'var(--accent)',bg:'var(--accent-soft)',tag:'48h',click:'openActivity()',footer:'<i class="fa-solid fa-list"></i> Click for live feed'}
   ];
   $('stats').innerHTML=cards.map(c=>`<div class="metric" ${c.click?`onclick="${c.click}"`:''}>
@@ -400,6 +415,17 @@ async function selectMonth(m){
 function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
 let activityTimer=null;
 function openActivity(){openModal('activityModal');loadActivity();if(activityTimer)clearInterval(activityTimer);activityTimer=setInterval(loadActivity,5000);}
+function openPos(){
+  const meta=$('posMeta'), rows=$('posRows');
+  if(!posClients.length){
+    meta.textContent='No POS clients are connected right now.';
+    rows.innerHTML='<tr><td colspan="4" style="text-align:center;padding:30px;color:var(--text-muted)">No connected POS clients</td></tr>';
+  }else{
+    meta.textContent=posClients.length+' connected POS client(s). Only currently connected POS clients are shown here.';
+    rows.innerHTML=posClients.map(c=>`<tr><td>${c.ip||'—'}</td><td class="password-cell">${c.mac||'—'}</td><td>${c.hostname||'—'}</td><td>${c.last_seen?new Date(c.last_seen).toLocaleString('en-NG',{timeZone:LAGOS_TZ}):'—'}</td></tr>`).join('');
+  }
+  openModal('posModal');
+}
 async function loadActivity(){
   const hours=$('activityHours').value;
   const d=await api('/admin/api/activity?sessionId='+sid+'&hours='+hours+'&limit=300');

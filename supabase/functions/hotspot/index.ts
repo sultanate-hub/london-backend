@@ -33,6 +33,7 @@ import {
 import { getSupabase } from "../_shared/supabase.ts";
 import { handleAdmin } from "../_shared/admin.ts";
 import { syncMikhmonUsers } from "../_shared/mikhmon.ts";
+import { purgePosClient, syncPosClients } from "../_shared/pos.ts";
 
 const PUBLIC_BASE = Deno.env.get("PUBLIC_BASE_URL") ||
   "https://pvslxeakzyhxfzlqakqg.supabase.co/functions/v1/hotspot";
@@ -271,6 +272,34 @@ async function mikhmonSync(req: Request): Promise<Response> {
   } catch (error) {
     const message = error instanceof Error ? error.message : "Mikhmon sync failed";
     console.error("Mikhmon sync error:", message);
+    return json({ success: false, error: message }, 500);
+  }
+}
+
+async function posSync(req: Request): Promise<Response> {
+  const body = await req.json().catch(() => null);
+  if (!body || !Array.isArray(body.clients)) {
+    return json({ success: false, error: "clients array required" }, 400);
+  }
+  try {
+    const result = await syncPosClients(getSupabase(), body.clients);
+    return json({ success: true, ...result });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "POS sync failed";
+    console.error("POS sync error:", message);
+    return json({ success: false, error: message }, 500);
+  }
+}
+
+async function posPurge(req: Request): Promise<Response> {
+  const body = await req.json().catch(() => null);
+  const mac = String(body?.mac ?? "").trim();
+  if (!mac) return json({ success: false, error: "mac required" }, 400);
+  try {
+    const removed = await purgePosClient(getSupabase(), mac);
+    return json({ success: true, removed });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "POS purge failed";
     return json({ success: false, error: message }, 500);
   }
 }
@@ -537,6 +566,14 @@ serve(async (req: Request) => {
     if (path === "/api/mikhmon-sync" && method === "POST") {
       if (!checkApiKey(req)) return text("FORBIDDEN", 403);
       return await mikhmonSync(req);
+    }
+    if (path === "/api/pos-sync" && method === "POST") {
+      if (!checkApiKey(req)) return text("FORBIDDEN", 403);
+      return await posSync(req);
+    }
+    if (path === "/api/pos-purge" && method === "POST") {
+      if (!checkApiKey(req)) return text("FORBIDDEN", 403);
+      return await posPurge(req);
     }
     if (path === "/api/mikrotik-queue-text" && method === "GET") {
       if (!checkApiKey(req)) return text("FORBIDDEN", 403);

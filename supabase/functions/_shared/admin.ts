@@ -2,6 +2,7 @@
 import { json, queryParams } from "./cors.ts";
 import { getSupabase } from "./supabase.ts";
 import { dateKey, revenueByDay, revenueByMonth, sumRevenue, type RevenueRow } from "./revenue.ts";
+import { getPosStats } from "./pos.ts";
 
 const SESSION_TIMEOUT = 5 * 60 * 1000;
 
@@ -122,6 +123,12 @@ export async function handleAdmin(req: Request, path: string): Promise<Response>
     stats.revenue_today = sumRevenue(rows, today);
     stats.revenue_week = sumRevenue(rows, dateKey(new Date(Date.now() - 6 * 86400000)));
     stats.revenue_month = sumRevenue(rows, dateKey(new Date(Date.now() - 29 * 86400000)));
+    try {
+      stats.pos = await getPosStats(sb);
+    } catch (posError) {
+      console.error("POS stats error:", posError instanceof Error ? posError.message : posError);
+      stats.pos = { connected: 0, total: 0, week: 0, month: 0, updated_at: null, clients: [] };
+    }
     return json({ success: true, data: stats });
   }
 
