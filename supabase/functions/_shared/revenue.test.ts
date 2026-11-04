@@ -9,7 +9,7 @@ import {
 
 Deno.test("priceOf uses the London plan prices", () => {
   assertEquals(priceOf("24hr"), 300);
-  assertEquals(priceOf("3d"), 1000);
+  assertEquals(priceOf("3d"), 900);
   assertEquals(priceOf("5d"), 1500);
   assertEquals(priceOf("7d"), 2000);
   assertEquals(priceOf("14d"), 3500);
@@ -30,8 +30,8 @@ Deno.test("sumRevenue filters from a Lagos date and ignores free plans", () => {
     { plan: "24hr", created_at: "2026-10-23T10:00:00Z" },
     { plan: "6h", created_at: "2026-10-23T10:00:00Z" },
   ];
-  assertEquals(sumRevenue(rows), 1600);
-  assertEquals(sumRevenue(rows, "2026-10-22"), 1300);
+  assertEquals(sumRevenue(rows), 1500);
+  assertEquals(sumRevenue(rows, "2026-10-22"), 1200);
   assertEquals(sumRevenue(rows, "2026-10-23"), 300);
 });
 
@@ -41,6 +41,6 @@ Deno.test("revenueByMonth and revenueByDay group correctly", () => {
     { plan: "24hr", created_at: "2026-10-22T12:00:00Z" },
     { plan: "3d", created_at: "2026-10-23T10:00:00Z" },
   ];
-  assertEquals(revenueByMonth(rows)["2026-10"], 1600);
-  assertEquals(revenueByDay(rows, "2026-10"), { 22: 600, 23: 1000 });
+  assertEquals(revenueByMonth(rows)["2026-10"], 1500);
+  assertEquals(revenueByDay(rows, "2026-10"), { 22: 600, 23: 900 });
 });

@@ -6,7 +6,7 @@
 
 export const PLAN_PRICES: Record<string, number> = {
   "24hr": 300,
-  "3d": 1000,
+  "3d": 900,
   "5d": 1500,
   "7d": 2000,
   "14d": 3500,

@@ -46,7 +46,7 @@ const SUCCESS_PAGE = Deno.env.get("SUCCESS_PAGE_URL") || "http://192.168.88.1/lo
 
 const planConfig: Record<string, { amount: number; code: string; duration: string; label: string }> = {
   daily: { amount: 300, code: "24hr", duration: "24 Hours", label: "Daily" },
-  "3day": { amount: 1000, code: "3d", duration: "3 Days", label: "3-Day" },
+  "3day": { amount: 900, code: "3d", duration: "3 Days", label: "3-Day" },
   "5day": { amount: 1500, code: "5d", duration: "5 Days", label: "5-Day" },
   weekly: { amount: 2000, code: "7d", duration: "7 Days", label: "Weekly" },
   "2week": { amount: 3500, code: "14d", duration: "14 Days", label: "2-Week" },
@@ -55,7 +55,8 @@ const planConfig: Record<string, { amount: number; code: string; duration: strin
 
 const amountToPlan: Record<number, string> = {
   300: "24hr",
-  1000: "3d",
+  900: "3d",
+  1000: "3d", // legacy pre-2026-11-04 amount; keep pending webhooks valid
   1500: "5d",
   2000: "7d",
   3500: "14d",
