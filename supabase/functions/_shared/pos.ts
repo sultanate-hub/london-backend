@@ -121,6 +121,13 @@ export async function syncPosClients(sb: any, incoming: any[]): Promise<{
   };
 }
 
+export async function resetPosState(sb: any): Promise<{ removed: number }> {
+  const state = await readPosState(sb);
+  const removed = Object.keys(state.clients).length;
+  await writePosState(sb, { clients: {}, updated_at: new Date().toISOString() });
+  return { removed };
+}
+
 export async function purgePosClient(sb: any, macRaw: string): Promise<boolean> {
   const mac = normMac(macRaw);
   if (!mac) return false;
