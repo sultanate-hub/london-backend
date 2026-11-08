@@ -6,7 +6,21 @@ const FILE = "clients.json";
 // Blocks live in their own object so the 60 s client sync can never overwrite a
 // block that a superadmin added while the sync was running.
 const BLOCKS_FILE = "blocks.json";
-const CONNECTED_TTL_MS = 5 * 60 * 1000;
+// The router syncs every 60 s. Two minutes keeps the list current without
+// dropping everyone if one fetch fails.
+const CONNECTED_TTL_MS = 2 * 60 * 1000;
+const POS_SUBNET_PREFIX = "192.168.20.";
+
+function isPosIp(value: string): boolean {
+  if (!value.startsWith(POS_SUBNET_PREFIX)) return false;
+  const last = Number(value.slice(POS_SUBNET_PREFIX.length));
+  return Number.isInteger(last) && last >= 1 && last <= 254;
+}
+
+function isUnicastMac(mac: string): boolean {
+  const first = parseInt(mac.slice(0, 2), 16);
+  return Number.isFinite(first) && (first & 1) === 0;
+}
 
 export type PosClient = {
   mac: string;
@@ -123,8 +137,11 @@ export async function syncPosClients(sb: any, incoming: any[]): Promise<{
 
   for (const raw of incoming) {
     const mac = normMac(raw?.mac);
-    if (!mac || mac === "00:00:00:00:00:00") continue;
+    if (!isValidMac(mac) || !isUnicastMac(mac)) continue;
     const ip = String(raw?.ip ?? "").trim();
+    // Only POS-VLAN addresses belong in the POS section. This also keeps a
+    // stray ARP entry from the guest/main network out of the list.
+    if (!isPosIp(ip)) continue;
     const hostname = String(raw?.hostname ?? "").trim();
     seen.add(mac);
     const prev = state.clients[mac];
@@ -259,7 +276,8 @@ export async function getPosStats(sb: any): Promise<{
 }> {
   const state = await readPosState(sb);
   const now = Date.now();
-  const clients = Object.values(state.clients);
+  // Defensive filter: older state files could contain non-POS ARP entries.
+  const clients = Object.values(state.clients).filter((c) => isPosIp(c.ip || ""));
   const live = clients.filter((c) =>
     c.connected && now - ts(c.last_seen) < CONNECTED_TTL_MS && !state.blocks[c.mac]
   );

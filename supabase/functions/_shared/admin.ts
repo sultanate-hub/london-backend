@@ -24,7 +24,10 @@ function adminUsers(): Record<string, AdminCfg> {
     admin: {
       password: Deno.env.get("ADMIN_VIEW_PASS") || "london-view-2026",
       role: "check",
-      permissions: ["view"],
+      // Full operations role: plans, clients, provider/contact settings. It is
+      // deliberately NOT allowed to block/unblock POS or see superadmin logins,
+      // and those checks are enforced separately below.
+      permissions: ["view", "delete", "create", "update", "extend", "manage_users", "export", "force_logout"],
     },
     staff: {
       password: Deno.env.get("ADMIN_STAFF_PASS") || "london-staff-2026",
@@ -312,10 +315,15 @@ export async function handleAdmin(req: Request, path: string): Promise<Response>
   }
 
   if (path === "/admin/api/sessions" && method === "GET") {
-    if (session.role !== "super_admin") return json({ error: "Permission denied" }, 403);
+    // Admin can see staff/admin login times. Only superadmin may see the
+    // superadmin row. Staff is view-only and gets no login data at all.
+    const canSeeLogins = session.role === "super_admin" || session.role === "check";
+    if (!canSeeLogins) return json({ error: "Permission denied" }, 403);
+    const isSuper = session.role === "super_admin";
     const cfg = adminUsers();
     const out: Array<Record<string, unknown>> = [];
     for (const [username, c] of Object.entries(cfg)) {
+      if (!isSuper && c.role === "super_admin") continue;
       const { data } = await getSupabase().from("admin_logs")
         .select("*").eq("username", username).order("login_time", { ascending: false }).limit(1);
       const row = data?.[0];
@@ -334,10 +342,12 @@ export async function handleAdmin(req: Request, path: string): Promise<Response>
   }
 
   if (path === "/admin/api/logs" && method === "GET") {
-    if (session.role !== "super_admin") return json({ error: "Permission denied" }, 403);
-    const { data, error } = await getSupabase().from("admin_logs")
-      .select("username, role, admin_ip, login_time, last_activity, is_active")
-      .order("login_time", { ascending: false }).limit(50);
+    const canSeeLogins = session.role === "super_admin" || session.role === "check";
+    if (!canSeeLogins) return json({ error: "Permission denied" }, 403);
+    let query: any = getSupabase().from("admin_logs")
+      .select("username, role, admin_ip, login_time, last_activity, is_active");
+    if (session.role !== "super_admin") query = query.neq("role", "super_admin");
+    const { data, error } = await query.order("login_time", { ascending: false }).limit(50);
     if (error) return json({ error: error.message }, 500);
     return json({ success: true, data });
   }

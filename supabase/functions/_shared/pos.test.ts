@@ -74,6 +74,20 @@ Deno.test("POS counter reset keeps the block policy", async () => {
   assertEquals((await getPosBlocks(sb)).count, 1);
 });
 
+Deno.test("POS sync ignores clients outside the POS VLAN", async () => {
+  const sb = fakeSupabase();
+  const result = await syncPosClients(sb, [
+    { mac: "AA:BB:CC:DD:EE:03", ip: "192.168.88.50", hostname: "guest-laptop" },
+    { mac: "AA:BB:CC:DD:EE:04", ip: "10.0.0.5", hostname: "main-lan" },
+    { mac: "01:BB:CC:DD:EE:05", ip: "192.168.20.12", hostname: "multicast" },
+  ]);
+  assertEquals(result.received, 3);
+  const stats = await getPosStats(sb);
+  assertEquals(stats.total, 0);
+  assertEquals(stats.connected, 0);
+  assertEquals(stats.clients.length, 0);
+});
+
 Deno.test("block rejects an invalid MAC", async () => {
   const sb = fakeSupabase();
   let failed = false;
