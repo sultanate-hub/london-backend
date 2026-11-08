@@ -269,7 +269,7 @@
         <div class="mut" style="margin-bottom:10px">These MACs are rejected on the POS VLAN. The router removes the block within 5 seconds of an unblock.</div>
         <div class="table-wrap"><table><thead><tr><th>MAC Address</th><th>Last IP</th><th>Hostname</th><th>Blocked</th><th>Action</th></tr></thead><tbody id="posBlockedRows"></tbody></table></div>
       </div>
-      <div class="mut" id="posBlockNote" style="margin-top:14px;font-size:12px"><i class="fa-solid fa-circle-info"></i> Blocking is MAC-based. A phone that changes its Wi-Fi MAC (private/randomised MAC) will appear as a new device and must be blocked again.</div>
+      <div class="mut" id="posBlockNote" style="margin-top:14px;font-size:12px"><i class="fa-solid fa-circle-info"></i> Blocks apply to the POS VLAN (192.168.20.0/24) and the POS SSID only. The same device can still use the guest Wi-Fi with the same MAC. Blocking is MAC-based, so a phone that changes its Wi-Fi MAC (private/randomised MAC) will appear as a new device and must be blocked again.</div>
     </div>
     <div class="modal-footer"><button class="btn" onclick="closeModal('posModal')">Close</button></div>
   </div>

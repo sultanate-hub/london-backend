@@ -278,7 +278,7 @@ export async function handleAdmin(req: Request, path: string): Promise<Response>
         success: true,
         block,
         apply_within_seconds: 5,
-        message: "Block saved. The router will eject this device and drop its internet within 5 seconds.",
+        message: "Block saved. The router will eject this device from the POS VLAN and drop its POS internet within 5 seconds. Guest/main Wi-Fi is not affected.",
       });
     } catch (error) {
       return json({ error: error instanceof Error ? error.message : "Block failed" }, 400);
