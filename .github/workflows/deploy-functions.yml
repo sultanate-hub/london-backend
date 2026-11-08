@@ -16,7 +16,9 @@ jobs:
 
       - uses: supabase/setup-cli@v1
         with:
-          version: latest
+          # Pin the CLI: "latest" resolves via the GitHub releases API and has
+          # failed with Gateway Timeout, blocking deploys even when code is fine.
+          version: 2.114.0
 
       - name: Verify SUPABASE_ACCESS_TOKEN secret
         env:
