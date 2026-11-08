@@ -33,7 +33,7 @@ import {
 import { getSupabase } from "../_shared/supabase.ts";
 import { handleAdmin } from "../_shared/admin.ts";
 import { syncMikhmonUsers } from "../_shared/mikhmon.ts";
-import { purgePosClient, resetPosState, syncPosClients } from "../_shared/pos.ts";
+import { getPosBlocks, purgePosClient, resetPosState, syncPosClients } from "../_shared/pos.ts";
 
 const PUBLIC_BASE = Deno.env.get("PUBLIC_BASE_URL") ||
   "https://pvslxeakzyhxfzlqakqg.supabase.co/functions/v1/hotspot";
@@ -288,6 +288,17 @@ async function posSync(req: Request): Promise<Response> {
   } catch (error) {
     const message = error instanceof Error ? error.message : "POS sync failed";
     console.error("POS sync error:", message);
+    return json({ success: false, error: message }, 500);
+  }
+}
+
+async function posBlocks(): Promise<Response> {
+  try {
+    const result = await getPosBlocks(getSupabase());
+    return json({ success: true, ...result });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "POS blocks failed";
+    console.error("POS blocks error:", message);
     return json({ success: false, error: message }, 500);
   }
 }
@@ -586,6 +597,10 @@ serve(async (req: Request) => {
     if (path === "/api/pos-purge" && method === "POST") {
       if (!checkApiKey(req)) return text("FORBIDDEN", 403);
       return await posPurge(req);
+    }
+    if (path === "/api/pos-blocks" && method === "GET") {
+      if (!checkApiKey(req)) return text("FORBIDDEN", 403);
+      return await posBlocks();
     }
     if (path === "/api/pos-reset" && method === "POST") {
       if (!checkApiKey(req)) return text("FORBIDDEN", 403);

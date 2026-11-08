@@ -3,6 +3,9 @@
 
 const BUCKET = "pos-state";
 const FILE = "clients.json";
+// Blocks live in their own object so the 60 s client sync can never overwrite a
+// block that a superadmin added while the sync was running.
+const BLOCKS_FILE = "blocks.json";
 const CONNECTED_TTL_MS = 5 * 60 * 1000;
 
 export type PosClient = {
@@ -16,13 +19,25 @@ export type PosClient = {
   last_disconnected: string | null;
 };
 
+export type PosBlock = {
+  mac: string;
+  reason: string;
+  blocked_at: string;
+  blocked_by: string;
+};
+
 type PosState = {
   clients: Record<string, PosClient>;
+  blocks: Record<string, PosBlock>;
   updated_at: string | null;
 };
 
-function normMac(value: unknown): string {
+export function normMac(value: unknown): string {
   return String(value ?? "").trim().toUpperCase().replace(/-/g, ":");
+}
+
+export function isValidMac(value: string): boolean {
+  return /^([0-9A-F]{2}:){5}[0-9A-F]{2}$/.test(value);
 }
 
 function ts(value: string | null | undefined): number {
@@ -40,27 +55,58 @@ async function ensureBucket(sb: any): Promise<void> {
 }
 
 export async function readPosState(sb: any): Promise<PosState> {
+  const state: PosState = { clients: {}, blocks: {}, updated_at: null };
   try {
     const { data, error } = await sb.storage.from(BUCKET).download(FILE);
-    if (error || !data) return { clients: {}, updated_at: null };
-    const parsed = JSON.parse(await data.text());
-    return {
-      clients: parsed && typeof parsed.clients === "object" && parsed.clients ? parsed.clients : {},
-      updated_at: parsed?.updated_at ?? null,
-    };
-  } catch (_error) {
-    return { clients: {}, updated_at: null };
-  }
+    if (!error && data) {
+      const parsed = JSON.parse(await data.text());
+      state.clients = parsed && typeof parsed.clients === "object" && parsed.clients ? parsed.clients : {};
+      state.updated_at = parsed?.updated_at ?? null;
+    }
+  } catch (_error) { /* a missing/corrupt client file is an empty history */ }
+  try {
+    const { data, error } = await sb.storage.from(BUCKET).download(BLOCKS_FILE);
+    if (!error && data) {
+      const parsed = JSON.parse(await data.text());
+      const rawBlocks = parsed?.blocks;
+      if (rawBlocks && typeof rawBlocks === "object") {
+        for (const [key, raw] of Object.entries(rawBlocks)) {
+          const value = raw as Partial<PosBlock>;
+          const mac = normMac(value?.mac || key);
+          if (!isValidMac(mac)) continue;
+          state.blocks[mac] = {
+            mac,
+            reason: String(value?.reason ?? ""),
+            blocked_at: String(value?.blocked_at ?? ""),
+            blocked_by: String(value?.blocked_by ?? ""),
+          };
+        }
+      }
+    }
+  } catch (_error) { /* a missing/corrupt block file means no blocks */ }
+  return state;
 }
 
 async function writePosState(sb: any, state: PosState): Promise<void> {
   await ensureBucket(sb);
-  const body = new Blob([JSON.stringify(state)], { type: "application/json" });
+  const body = new Blob([JSON.stringify({ clients: state.clients, updated_at: state.updated_at })], {
+    type: "application/json",
+  });
   const { error } = await sb.storage.from(BUCKET).upload(FILE, body, {
     upsert: true,
     contentType: "application/json",
   });
   if (error) throw new Error(`POS storage write: ${error.message}`);
+}
+
+async function writePosBlocks(sb: any, blocks: Record<string, PosBlock>, updatedAt: string): Promise<void> {
+  await ensureBucket(sb);
+  const body = new Blob([JSON.stringify({ blocks, updated_at: updatedAt })], { type: "application/json" });
+  const { error } = await sb.storage.from(BUCKET).upload(BLOCKS_FILE, body, {
+    upsert: true,
+    contentType: "application/json",
+  });
+  if (error) throw new Error(`POS block storage write: ${error.message}`);
 }
 
 export async function syncPosClients(sb: any, incoming: any[]): Promise<{
@@ -109,7 +155,7 @@ export async function syncPosClients(sb: any, incoming: any[]): Promise<{
   await writePosState(sb, state);
 
   const connected = Object.values(state.clients).filter((c) =>
-    c.connected && Date.now() - ts(c.last_seen) < CONNECTED_TTL_MS
+    c.connected && Date.now() - ts(c.last_seen) < CONNECTED_TTL_MS && !state.blocks[c.mac]
   ).length;
 
   return {
@@ -124,7 +170,8 @@ export async function syncPosClients(sb: any, incoming: any[]): Promise<{
 export async function resetPosState(sb: any): Promise<{ removed: number }> {
   const state = await readPosState(sb);
   const removed = Object.keys(state.clients).length;
-  await writePosState(sb, { clients: {}, updated_at: new Date().toISOString() });
+  // Blocks are policy, not history. Keep them when the counter is reset.
+  await writePosState(sb, { clients: {}, blocks: state.blocks, updated_at: new Date().toISOString() });
   return { removed };
 }
 
@@ -139,11 +186,58 @@ export async function purgePosClient(sb: any, macRaw: string): Promise<boolean> 
   return true;
 }
 
+export async function blockPosClient(
+  sb: any,
+  macRaw: string,
+  reason: string,
+  actor: string,
+): Promise<PosBlock> {
+  const mac = normMac(macRaw);
+  if (!isValidMac(mac)) throw new Error("Invalid MAC address");
+  const state = await readPosState(sb);
+  const now = new Date().toISOString();
+  const block: PosBlock = {
+    mac,
+    reason: String(reason ?? "").trim().slice(0, 200),
+    blocked_at: now,
+    blocked_by: String(actor || "superadmin"),
+  };
+  state.blocks[mac] = block;
+  await writePosBlocks(sb, state.blocks, now);
+  return block;
+}
+
+export async function unblockPosClient(sb: any, macRaw: string): Promise<boolean> {
+  const mac = normMac(macRaw);
+  if (!isValidMac(mac)) throw new Error("Invalid MAC address");
+  const state = await readPosState(sb);
+  if (!state.blocks[mac]) return false;
+  delete state.blocks[mac];
+  await writePosBlocks(sb, state.blocks, new Date().toISOString());
+  return true;
+}
+
+export async function getPosBlocks(sb: any): Promise<{
+  count: number;
+  updated_at: string | null;
+  blocks: Array<{ mac: string; reason: string; blocked_at: string }>;
+}> {
+  const state = await readPosState(sb);
+  return {
+    count: Object.keys(state.blocks).length,
+    updated_at: state.updated_at,
+    blocks: Object.values(state.blocks)
+      .map((b) => ({ mac: b.mac, reason: b.reason, blocked_at: b.blocked_at }))
+      .sort((a, b) => a.mac.localeCompare(b.mac)),
+  };
+}
+
 export async function getPosStats(sb: any): Promise<{
   connected: number;
   total: number;
   week: number;
   month: number;
+  blocked_count: number;
   updated_at: string | null;
   clients: Array<{
     mac: string;
@@ -153,11 +247,22 @@ export async function getPosStats(sb: any): Promise<{
     last_seen: string;
     connected: boolean;
   }>;
+  blocked: Array<{
+    mac: string;
+    reason: string;
+    blocked_at: string;
+    blocked_by: string;
+    ip: string;
+    hostname: string;
+    last_seen: string | null;
+  }>;
 }> {
   const state = await readPosState(sb);
   const now = Date.now();
   const clients = Object.values(state.clients);
-  const live = clients.filter((c) => c.connected && now - ts(c.last_seen) < CONNECTED_TTL_MS);
+  const live = clients.filter((c) =>
+    c.connected && now - ts(c.last_seen) < CONNECTED_TTL_MS && !state.blocks[c.mac]
+  );
   const weekStart = now - 7 * 86400000;
   const monthStart = now - 30 * 86400000;
 
@@ -166,6 +271,7 @@ export async function getPosStats(sb: any): Promise<{
     total: clients.length,
     week: clients.filter((c) => ts(c.last_seen) >= weekStart).length,
     month: clients.filter((c) => ts(c.last_seen) >= monthStart).length,
+    blocked_count: Object.keys(state.blocks).length,
     updated_at: state.updated_at,
     clients: live
       .map((c) => ({
@@ -177,5 +283,19 @@ export async function getPosStats(sb: any): Promise<{
         connected: true,
       }))
       .sort((a, b) => a.ip.localeCompare(b.ip)),
+    blocked: Object.values(state.blocks)
+      .map((b) => {
+        const c = state.clients[b.mac];
+        return {
+          mac: b.mac,
+          reason: b.reason,
+          blocked_at: b.blocked_at,
+          blocked_by: b.blocked_by,
+          ip: c?.ip || "",
+          hostname: c?.hostname || "",
+          last_seen: c?.last_seen || null,
+        };
+      })
+      .sort((a, b) => a.mac.localeCompare(b.mac)),
   };
 }

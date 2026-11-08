@@ -2,7 +2,7 @@
 import { json, queryParams } from "./cors.ts";
 import { getSupabase } from "./supabase.ts";
 import { dateKey, revenueByDay, revenueByMonth, sumRevenue, type RevenueRow } from "./revenue.ts";
-import { getPosStats } from "./pos.ts";
+import { blockPosClient, getPosStats, unblockPosClient } from "./pos.ts";
 
 const SESSION_TIMEOUT = 5 * 60 * 1000;
 
@@ -58,6 +58,18 @@ function clientIp(req: Request): string {
 
 async function readJson(req: Request): Promise<Record<string, unknown>> {
   return await req.json().catch(() => ({}));
+}
+
+async function logPosSecurity(sb: any, message: string, mac: string, username: string): Promise<void> {
+  try {
+    await sb.from("activity_log").insert({
+      source: "admin",
+      message,
+      level: "security",
+      mac: mac || null,
+      username: username || null,
+    });
+  } catch (_) { /* audit logging must never block the action */ }
 }
 
 async function fetchRevenueRows(sb: any): Promise<RevenueRow[]> {
@@ -127,9 +139,21 @@ export async function handleAdmin(req: Request, path: string): Promise<Response>
       stats.pos = await getPosStats(sb);
     } catch (posError) {
       console.error("POS stats error:", posError instanceof Error ? posError.message : posError);
-      stats.pos = { connected: 0, total: 0, week: 0, month: 0, updated_at: null, clients: [] };
+      stats.pos = {
+        connected: 0, total: 0, week: 0, month: 0, blocked_count: 0,
+        updated_at: null, clients: [], blocked: [],
+      };
     }
     return json({ success: true, data: stats });
+  }
+
+  if (path === "/admin/api/pos" && method === "GET") {
+    try {
+      return json({ success: true, pos: await getPosStats(getSupabase()) });
+    } catch (posError) {
+      const message = posError instanceof Error ? posError.message : "POS stats failed";
+      return json({ error: message }, 500);
+    }
   }
 
   if (path === "/admin/api/daily" && method === "GET") {
@@ -219,6 +243,57 @@ export async function handleAdmin(req: Request, path: string): Promise<Response>
       return json({ success: true, message: `Status set to ${next}` });
     }
     return json({ error: "Unknown action" }, 400);
+  }
+
+  if (path === "/admin/api/pos-block" && method === "POST") {
+    // Deliberately stricter than the normal permission list: only a super admin
+    // may cut a device off the POS network, and only from a validated session.
+    if (session.role !== "super_admin") return json({ error: "Permission denied" }, 403);
+    const mac = String(body.mac || "");
+    const reason = String(body.reason || "Blocked from admin dashboard");
+    try {
+      const block = await blockPosClient(getSupabase(), mac, reason, String(session.username || "superadmin"));
+      await logPosSecurity(
+        getSupabase(),
+        `POS device blocked by ${session.username}: ${block.mac}${block.reason ? ` (${block.reason})` : ""}`,
+        block.mac,
+        String(session.username || ""),
+      );
+      return json({
+        success: true,
+        block,
+        apply_within_seconds: 5,
+        message: "Block saved. The router will eject this device and drop its internet within 5 seconds.",
+      });
+    } catch (error) {
+      return json({ error: error instanceof Error ? error.message : "Block failed" }, 400);
+    }
+  }
+
+  if (path === "/admin/api/pos-unblock" && method === "POST") {
+    if (session.role !== "super_admin") return json({ error: "Permission denied" }, 403);
+    const mac = String(body.mac || "");
+    try {
+      const removed = await unblockPosClient(getSupabase(), mac);
+      if (removed) {
+        await logPosSecurity(
+          getSupabase(),
+          `POS device unblocked by ${session.username}: ${mac}`,
+          mac,
+          String(session.username || ""),
+        );
+      }
+      return json({
+        success: true,
+        removed,
+        apply_within_seconds: 5,
+        message: removed
+          ? "Unblock saved. The router will remove the block within 5 seconds; the device can then reconnect."
+          : "That MAC was not blocked.",
+      });
+    } catch (error) {
+      return json({ error: error instanceof Error ? error.message : "Unblock failed" }, 400);
+    }
   }
 
   if (path === "/admin/api/sessions" && method === "GET") {
