@@ -26,6 +26,11 @@ function adminUsers(): Record<string, AdminCfg> {
       role: "check",
       permissions: ["view"],
     },
+    staff: {
+      password: Deno.env.get("ADMIN_STAFF_PASS") || "london-staff-2026",
+      role: "staff",
+      permissions: ["view"],
+    },
   };
 }
 
@@ -70,6 +75,14 @@ async function logPosSecurity(sb: any, message: string, mac: string, username: s
       username: username || null,
     });
   } catch (_) { /* audit logging must never block the action */ }
+}
+
+function posForViewer(pos: any, role: string): any {
+  if (!pos || role === "super_admin") return pos;
+  // Block policy is a superadmin-only feature. View-only admins still see the
+  // live POS count/list, but not blocked MACs, reasons, or timestamps.
+  const { blocked: _blocked, blocked_count: _blockedCount, ...visible } = pos;
+  return visible;
 }
 
 async function fetchRevenueRows(sb: any): Promise<RevenueRow[]> {
@@ -136,7 +149,7 @@ export async function handleAdmin(req: Request, path: string): Promise<Response>
     stats.revenue_week = sumRevenue(rows, dateKey(new Date(Date.now() - 6 * 86400000)));
     stats.revenue_month = sumRevenue(rows, dateKey(new Date(Date.now() - 29 * 86400000)));
     try {
-      stats.pos = await getPosStats(sb);
+      stats.pos = posForViewer(await getPosStats(sb), String(session.role || ""));
     } catch (posError) {
       console.error("POS stats error:", posError instanceof Error ? posError.message : posError);
       stats.pos = {
@@ -149,7 +162,8 @@ export async function handleAdmin(req: Request, path: string): Promise<Response>
 
   if (path === "/admin/api/pos" && method === "GET") {
     try {
-      return json({ success: true, pos: await getPosStats(getSupabase()) });
+      const pos = await getPosStats(getSupabase());
+      return json({ success: true, pos: posForViewer(pos, String(session.role || "")) });
     } catch (posError) {
       const message = posError instanceof Error ? posError.message : "POS stats failed";
       return json({ error: message }, 500);
@@ -172,11 +186,12 @@ export async function handleAdmin(req: Request, path: string): Promise<Response>
     const hours = Math.min(168, Math.max(1, parseInt(q.get("hours") || "48", 10)));
     const limit = Math.min(500, Math.max(10, parseInt(q.get("limit") || "200", 10)));
     const since = new Date(Date.now() - hours * 3600 * 1000).toISOString();
-    const { data, error } = await getSupabase().from("activity_log")
+    let query: any = getSupabase().from("activity_log")
       .select("id, created_at, level, source, message, ref, username, mac")
-      .gte("created_at", since)
-      .order("created_at", { ascending: false })
-      .limit(limit);
+      .gte("created_at", since);
+    // Security events include POS blocks and are superadmin-only.
+    if (session.role !== "super_admin") query = query.neq("level", "security");
+    const { data, error } = await query.order("created_at", { ascending: false }).limit(limit);
     if (error) return json({ error: error.message }, 500);
     return json({ success: true, data, hours });
   }
@@ -297,6 +312,7 @@ export async function handleAdmin(req: Request, path: string): Promise<Response>
   }
 
   if (path === "/admin/api/sessions" && method === "GET") {
+    if (session.role !== "super_admin") return json({ error: "Permission denied" }, 403);
     const cfg = adminUsers();
     const out: Array<Record<string, unknown>> = [];
     for (const [username, c] of Object.entries(cfg)) {
@@ -318,6 +334,7 @@ export async function handleAdmin(req: Request, path: string): Promise<Response>
   }
 
   if (path === "/admin/api/logs" && method === "GET") {
+    if (session.role !== "super_admin") return json({ error: "Permission denied" }, 403);
     const { data, error } = await getSupabase().from("admin_logs")
       .select("username, role, admin_ip, login_time, last_activity, is_active")
       .order("login_time", { ascending: false }).limit(50);
@@ -345,6 +362,7 @@ export async function handleAdmin(req: Request, path: string): Promise<Response>
     return json({ success: true, method: (m === "email" ? "email" : "phone") });
   }
   if (path === "/admin/api/contact-method" && method === "POST") {
+    if (!can("manage_users")) return json({ error: "Permission denied" }, 403);
     const method = String(body.method || "").toLowerCase();
     if (!["phone", "email"].includes(method)) return json({ error: "Invalid method" }, 400);
     const { error } = await getSupabase().from("app_settings")

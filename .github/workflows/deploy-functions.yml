@@ -35,6 +35,7 @@ jobs:
           PAYMENT_PROVIDER=${{ secrets.PAYMENT_PROVIDER }}
           ADMIN_SUPER_PASS=${{ secrets.ADMIN_SUPER_PASS }}
           ADMIN_VIEW_PASS=${{ secrets.ADMIN_VIEW_PASS }}
+          ADMIN_STAFF_PASS=${{ secrets.ADMIN_STAFF_PASS }}
           PUBLIC_BASE_URL=${{ secrets.PUBLIC_BASE_URL }}
           EOF
       # NOTE: payment provider keys (PAYSTACK_SECRET_KEY, SQUAD_SECRET_KEY,

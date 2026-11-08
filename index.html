@@ -152,7 +152,7 @@
       <div class="chip"><span class="dot"></span><span>Network Live</span></div>
       <button class="btn" onclick="refreshAll()"><i class="fa-solid fa-rotate"></i> Refresh</button>
       <button class="btn" id="contactToggleBtn" onclick="openContact()"><i class="fa-solid fa-mobile-screen"></i> <span id="contactLabel">Phone</span></button>
-      <button class="btn" onclick="openProvider()"><i class="fa-solid fa-credit-card"></i> <span id="provLabel">Provider</span></button>
+      <button class="btn" id="providerBtn" onclick="openProvider()"><i class="fa-solid fa-credit-card"></i> <span id="provLabel">Provider</span></button>
       <button class="btn btn-danger" onclick="logout()"><i class="fa-solid fa-right-from-bracket"></i> <span>Logout</span></button>
     </div>
   </nav>
@@ -181,7 +181,7 @@
       </div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Client</th><th>Password</th><th>Plan</th><th>Status</th><th>MAC</th><th>Expires</th><th style="text-align:right">Actions</th></tr></thead>
+          <thead><tr><th>Client</th><th>Password</th><th>Plan</th><th>Status</th><th>MAC</th><th>Expires</th><th id="usersActionHead" style="text-align:right">Actions</th></tr></thead>
           <tbody id="users"></tbody>
         </table>
       </div>
@@ -263,13 +263,13 @@
     <div class="modal-header"><h3 class="modal-title"><i class="fa-solid fa-store"></i> Connected POS Clients</h3><button class="modal-close" onclick="closeModal('posModal')">&times;</button></div>
     <div class="modal-body">
       <div class="mut" id="posMeta" style="margin-bottom:12px"></div>
-      <div class="table-wrap"><table><thead><tr><th>IP Address</th><th>MAC Address</th><th>Hostname</th><th>Last Seen</th><th>Action</th></tr></thead><tbody id="posRows"></tbody></table></div>
+      <div class="table-wrap"><table><thead><tr><th>IP Address</th><th>MAC Address</th><th>Hostname</th><th>Last Seen</th><th id="posActionHead">Action</th></tr></thead><tbody id="posRows"></tbody></table></div>
       <div id="posBlockedWrap" style="margin-top:22px;display:none">
         <h4 style="font-size:13px;margin-bottom:6px;color:var(--danger)"><i class="fa-solid fa-ban"></i> Blocked POS devices</h4>
         <div class="mut" style="margin-bottom:10px">These MACs are rejected on the POS VLAN. The router removes the block within 5 seconds of an unblock.</div>
         <div class="table-wrap"><table><thead><tr><th>MAC Address</th><th>Last IP</th><th>Hostname</th><th>Blocked</th><th>Action</th></tr></thead><tbody id="posBlockedRows"></tbody></table></div>
       </div>
-      <div class="mut" style="margin-top:14px;font-size:12px"><i class="fa-solid fa-circle-info"></i> Blocking is MAC-based. A phone that changes its Wi-Fi MAC (private/randomised MAC) will appear as a new device and must be blocked again.</div>
+      <div class="mut" id="posBlockNote" style="margin-top:14px;font-size:12px"><i class="fa-solid fa-circle-info"></i> Blocking is MAC-based. A phone that changes its Wi-Fi MAC (private/randomised MAC) will appear as a new device and must be blocked again.</div>
     </div>
     <div class="modal-footer"><button class="btn" onclick="closeModal('posModal')">Close</button></div>
   </div>
@@ -312,7 +312,8 @@ function toast(m){const t=$('toast');t.textContent=m;t.style.display='block';set
 function openModal(id){$(id).classList.add('open');}
 function closeModal(id){$(id).classList.remove('open');if(id==='activityModal'&&activityTimer){clearInterval(activityTimer);activityTimer=null;}if(id==='posModal'&&posTimer){clearInterval(posTimer);posTimer=null;}}
 let currentRole='';
-function setRole(username,role){currentRole=role||'';$('who').textContent=username;const c=$('roleChip');c.textContent=role==='super_admin'?'SUPER ADMIN':'ADMIN';c.style.background=role==='super_admin'?'var(--gold-soft)':'var(--accent-soft)';c.style.color=role==='super_admin'?'var(--gold)':'var(--accent)';}
+function roleLabel(role){return role==='super_admin'?'SUPER ADMIN':role==='staff'?'STAFF':'ADMIN';}
+function setRole(username,role){currentRole=role||'';const canManage=role==='super_admin';$('who').textContent=username;const c=$('roleChip');c.textContent=roleLabel(role);c.style.background=canManage?'var(--gold-soft)':'var(--accent-soft)';c.style.color=canManage?'var(--gold)':'var(--accent)';const ct=$('contactToggleBtn'),pb=$('providerBtn'),uh=$('usersActionHead');if(ct)ct.style.display=canManage?'':'none';if(pb)pb.style.display=canManage?'':'none';if(uh)uh.style.display=canManage?'':'none';}
 let idleTimer=null;
 let posClients=[], posBlocked=[], posTimer=null;
 function resetIdle(){clearTimeout(idleTimer);idleTimer=setTimeout(()=>{if(sid){toast('Logged out after 5 minutes of inactivity');logout();}},5*60*1000);}
@@ -344,20 +345,21 @@ async function loadStats(){
   const d=await api('/admin/api/stats?sessionId='+sid);if(!d.success)return;const s=d.data;
   const pos=s.pos||{connected:0,total:0,week:0,month:0,clients:[],blocked:[]};posClients=Array.isArray(pos.clients)?pos.clients:[];posBlocked=Array.isArray(pos.blocked)?pos.blocked:[];
   let sessions=0;
-  try{const l=await api('/admin/api/sessions?sessionId='+sid);if(l.success)sessions=l.active;}catch(e){}
+  if(currentRole==='super_admin'){try{const l=await api('/admin/api/sessions?sessionId='+sid);if(l.success)sessions=l.active;}catch(e){}}
+  const isSuper=currentRole==='super_admin';
   let activityCount=0;
   try{const a=await api('/admin/api/activity?sessionId='+sid+'&hours=48&limit=500');if(a.success)activityCount=new Set((a.data||[]).filter(r=>r.ref).map(r=>r.ref)).size;}catch(e){}
   const cards=[
     {v:money(s.revenue_lifetime),label:'Total Revenue Generated',ic:'fa-money-bill-trend-up',c:'var(--gold)',bg:'var(--gold-soft)',tag:'Lifetime',currency:true,click:'openRevenue()',footer:'<i class="fa-solid fa-chart-line"></i> Click for detailed analytics'},
     {v:money(s.revenue_today),label:"Today's Revenue",ic:'fa-calendar-day',c:'var(--cyan)',bg:'var(--cyan-bg)',tag:'TODAY',currency:true,footer:`<i class="fa-solid fa-user-plus"></i> ${s.signups_today} signups today`},
     {v:s.processed,label:'Currently Active Users',ic:'fa-users',c:'var(--success)',bg:'var(--success-bg)',tag:'ACTIVE',footer:`<span style="color:var(--danger)"><i class="fa-solid fa-xmark"></i> ${s.expired} expired</span><span style="color:var(--warning);margin-left:12px"><i class="fa-solid fa-clock"></i> ${s.pending} pending</span>`},
-    {v:sessions,label:'Active Admin Sessions',ic:'fa-user-shield',c:'var(--purple)',bg:'var(--purple-bg)',tag:'SESSIONS',click:'showSessions()'},
+    {v:sessions,label:'Active Admin Sessions',ic:'fa-user-shield',c:'var(--purple)',bg:'var(--purple-bg)',tag:'SESSIONS',click:'showSessions()',superOnly:true},
     {v:money(s.revenue_week),label:'This Week',ic:'fa-calendar-week',c:'var(--warning)',bg:'var(--warning-bg)',tag:'7 days',currency:true,footer:`<i class="fa-solid fa-store"></i> POS seen: <strong>${pos.week}</strong>`},
     {v:money(s.revenue_month),label:'This Month',ic:'fa-calendar-days',c:'var(--accent)',bg:'var(--accent-soft)',tag:'30 days',currency:true,footer:`<i class="fa-solid fa-store"></i> POS seen: <strong>${pos.month}</strong>`},
     {v:s.total_users,label:'Total Clients',ic:'fa-address-book',c:'var(--cyan)',bg:'var(--cyan-bg)',tag:'All time',footer:`<i class="fa-solid fa-store"></i> POS: <strong>${pos.connected}</strong> connected · <strong>${pos.total}</strong> all-time`},
-    {v:pos.connected,label:'POS Clients',ic:'fa-store',c:'var(--gold)',bg:'var(--gold-soft)',tag:'CONNECTED',click:'openPos()',footer:`All-time <strong>${pos.total}</strong> · 7d <strong>${pos.week}</strong> · 30d <strong>${pos.month}</strong>${pos.blocked_count?` · <span style="color:var(--danger)">${pos.blocked_count} blocked</span>`:''}`},
+    {v:pos.connected,label:'POS Clients',ic:'fa-store',c:'var(--gold)',bg:'var(--gold-soft)',tag:'CONNECTED',click:'openPos()',footer:`All-time <strong>${pos.total}</strong> · 7d <strong>${pos.week}</strong> · 30d <strong>${pos.month}</strong>${isSuper&&pos.blocked_count?` · <span style="color:var(--danger)">${pos.blocked_count} blocked</span>`:''}`},
     {v:activityCount,label:'Live Activity',ic:'fa-wave-square',c:'var(--accent)',bg:'var(--accent-soft)',tag:'48h',click:'openActivity()',footer:'<i class="fa-solid fa-list"></i> Click for live feed'}
-  ];
+  ].filter(c=>!c.superOnly||currentRole==='super_admin');
   $('stats').innerHTML=cards.map(c=>`<div class="metric" ${c.click?`onclick="${c.click}"`:''}>
     <div class="metric-header"><div class="metric-icon" style="background:${c.bg};color:${c.c}"><i class="fa-solid ${c.ic}"></i></div>
     <span class="metric-tag" style="background:${c.bg};color:${c.c}">${c.tag}</span></div>
@@ -376,16 +378,15 @@ async function loadUsers(p){
   $('pageInfo').innerHTML=d.total?`Showing <strong>${start}–${end}</strong> of <strong>${d.total}</strong> clients`:'No clients';
   $('prevBtn').classList.toggle('disabled',d.page<=1);
   $('nextBtn').classList.toggle('disabled',end>=d.total);
-  $('users').innerHTML=d.data.map(u=>{const isM=String(u.transaction_id||'').startsWith('mikhmon-');return `<tr data-source="${isM?'mikhmon':'auto'}">
+  $('users').innerHTML=d.data.map(u=>{const isM=String(u.transaction_id||'').startsWith('mikhmon-');const actionCell=currentRole==='super_admin'?`<td style="text-align:right;white-space:nowrap"><button class="btn" style="padding:6px 12px" onclick="openExtend(${u.id},'${u.mikrotik_username}')"><i class="fa-solid fa-clock-rotate-left"></i></button>
+    <button class="btn btn-danger" style="padding:6px 12px" onclick="del(${u.id})"><i class="fa-solid fa-trash"></i></button></td>`:'';return `<tr data-source="${isM?'mikhmon':'auto'}">
     <td><div class="username">${u.mikrotik_username||''}</div><div class="user-email">${u.customer_email||''}</div></td>
     <td class="password-cell">${u.mikrotik_password||''}</td>
     <td><span class="plan-tag tag-${u.plan||'24hr'}">${u.plan||'—'}</span></td>
     <td><span class="badge badge-${effStatus(u)}">${statusLabel(effStatus(u))}</span></td>
     <td class="mono" style="color:var(--text-muted);font-size:12px">${u.mac_address||''}</td>
-    <td class="user-email">${fmtDT(u.expires_at)}</td>
-    <td style="text-align:right;white-space:nowrap"><button class="btn" style="padding:6px 12px" onclick="openExtend(${u.id},'${u.mikrotik_username}')"><i class="fa-solid fa-clock-rotate-left"></i></button>
-    <button class="btn btn-danger" style="padding:6px 12px" onclick="del(${u.id})"><i class="fa-solid fa-trash"></i></button></td>
-  </tr>`}).join('')||'<tr><td colspan="7" style="text-align:center;padding:40px;color:var(--text-muted)">No clients found</td></tr>';
+    <td class="user-email">${fmtDT(u.expires_at)}</td>${actionCell}
+  </tr>`}).join('')||`<tr><td colspan="${currentRole==='super_admin'?7:6}" style="text-align:center;padding:40px;color:var(--text-muted)">No clients found</td></tr>`;
 }
 $('search')?.addEventListener('keydown',e=>{if(e.key==='Enter')loadUsers(1);});
 function openExtend(id,name){extId=id;$('extendUser').textContent=name;$('extendModal').classList.add('open');}
@@ -423,28 +424,26 @@ function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return
 let activityTimer=null;
 function openActivity(){openModal('activityModal');loadActivity();if(activityTimer)clearInterval(activityTimer);activityTimer=setInterval(loadActivity,5000);}
 function renderPos(){
+  const isSuper=currentRole==='super_admin';
   const meta=$('posMeta'), rows=$('posRows');
+  $('posActionHead').style.display=isSuper?'':'none';
+  $('posBlockNote').style.display=isSuper?'':'none';
   if(!posClients.length){
     meta.textContent='No POS clients are connected right now.';
-    rows.innerHTML='<tr><td colspan="5" style="text-align:center;padding:30px;color:var(--text-muted)">No connected POS clients</td></tr>';
+    rows.innerHTML=`<tr><td colspan="${isSuper?5:4}" style="text-align:center;padding:30px;color:var(--text-muted)">No connected POS clients</td></tr>`;
   }else{
     meta.textContent=posClients.length+' connected POS client(s). Only currently connected POS clients are shown here.';
     rows.innerHTML=posClients.map(c=>{
-      const action=currentRole==='super_admin'
-        ?`<button class="btn btn-danger" style="padding:6px 12px" onclick="blockPos('${c.mac}')"><i class="fa-solid fa-ban"></i> Block</button>`
-        :'<span class="mut" style="font-size:12px"><i class="fa-solid fa-lock"></i> superadmin</span>';
-      return `<tr><td>${esc(c.ip||'—')}</td><td class="password-cell">${esc(c.mac||'—')}</td><td>${esc(c.hostname||'—')}</td><td>${c.last_seen?new Date(c.last_seen).toLocaleString('en-NG',{timeZone:LAGOS_TZ}):'—'}</td><td style="text-align:right;white-space:nowrap">${action}</td></tr>`;
+      const actionCell=isSuper
+        ?`<td style="text-align:right;white-space:nowrap"><button class="btn btn-danger" style="padding:6px 12px" onclick="blockPos('${c.mac}')"><i class="fa-solid fa-ban"></i> Block</button></td>`
+        :'';
+      return `<tr><td>${esc(c.ip||'—')}</td><td class="password-cell">${esc(c.mac||'—')}</td><td>${esc(c.hostname||'—')}</td><td>${c.last_seen?new Date(c.last_seen).toLocaleString('en-NG',{timeZone:LAGOS_TZ}):'—'}</td>${actionCell}</tr>`;
     }).join('');
   }
   const wrap=$('posBlockedWrap');
-  if(posBlocked.length){
+  if(isSuper&&posBlocked.length){
     wrap.style.display='block';
-    $('posBlockedRows').innerHTML=posBlocked.map(b=>{
-      const action=currentRole==='super_admin'
-        ?`<button class="btn" style="padding:6px 12px" onclick="unblockPos('${b.mac}')"><i class="fa-solid fa-unlock"></i> Unblock</button>`
-        :'<span class="mut" style="font-size:12px"><i class="fa-solid fa-lock"></i> superadmin</span>';
-      return `<tr><td class="password-cell">${esc(b.mac)}</td><td>${esc(b.ip||'—')}</td><td>${esc(b.hostname||'—')}</td><td>${b.blocked_at?fmtDT(b.blocked_at):'—'}<div class="user-email">by ${esc(b.blocked_by||'—')}</div></td><td style="text-align:right;white-space:nowrap">${action}</td></tr>`;
-    }).join('');
+    $('posBlockedRows').innerHTML=posBlocked.map(b=>`<tr><td class="password-cell">${esc(b.mac)}</td><td>${esc(b.ip||'—')}</td><td>${esc(b.hostname||'—')}</td><td>${b.blocked_at?fmtDT(b.blocked_at):'—'}<div class="user-email">by ${esc(b.blocked_by||'—')}</div></td><td style="text-align:right;white-space:nowrap"><button class="btn" style="padding:6px 12px" onclick="unblockPos('${b.mac}')"><i class="fa-solid fa-unlock"></i> Unblock</button></td></tr>`).join('');
   }else{
     wrap.style.display='none';
     $('posBlockedRows').innerHTML='';
@@ -490,14 +489,15 @@ async function loadActivity(){
 }
 function fmtIdle(s){s=Math.max(0,Number(s)||0);const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),sec=s%60;return h?`${h}h ${m}m idle`:`${m}m ${sec}s idle`;}
 async function showSessions(){
-  const d=await api('/admin/api/sessions?sessionId='+sid);if(!d.success)return;
+  if(currentRole!=='super_admin'){toast('Only a super admin can view admin login times');return;}
+  const d=await api('/admin/api/sessions?sessionId='+sid);if(!d.success){toast(d.error||'Not available');return;}
   $('logs').innerHTML=d.data.map(r=>{
-    const roleLabel=r.role==='super_admin'?'SUPER ADMIN':'ADMIN';
+    const label=roleLabel(r.role);
     const you=r.is_current?' <span style="color:var(--accent);font-weight:700">(You)</span>':'';
-    if(!r.has_session) return `<tr><td><strong>${r.username}</strong>${you}<div class="user-email">${roleLabel}</div></td><td colspan="3" style="color:var(--text-muted);padding:16px 24px">Never logged in</td></tr>`;
+    if(!r.has_session) return `<tr><td><strong>${r.username}</strong>${you}<div class="user-email">${label}</div></td><td colspan="3" style="color:var(--text-muted);padding:16px 24px">Never logged in</td></tr>`;
     const idleCls=r.idle_seconds<300?'var(--accent)':'var(--text-secondary)';
     return `<tr>
-      <td><strong>${r.username}</strong>${you}<div class="user-email">${roleLabel}</div></td>
+      <td><strong>${r.username}</strong>${you}<div class="user-email">${label}</div></td>
       <td class="mono" style="font-size:12px;color:var(--text-secondary)">${r.ip||'—'}</td>
       <td class="user-email">${fmtDT(r.login_time)}</td>
       <td style="color:${idleCls};font-weight:600">${fmtIdle(r.idle_seconds)}</td>
