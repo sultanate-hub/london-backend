@@ -342,7 +342,11 @@ async function ensureQueued(ref: string, reason: string): Promise<"existing" | "
 async function reconcilePayments(req: Request): Promise<Response> {
   const body = await req.json().catch(() => ({}));
   const refs: string[] = Array.isArray(body?.refs) ? body.refs.map((r: unknown) => String(r)) : [];
-  const since = typeof body?.since === "string" ? body.since : "";
+  // No refs and no `since` => sweep the last 48 hours. This makes a scheduled
+  // call with an empty body a complete safety net for lost webhooks.
+  const since = typeof body?.since === "string" && body.since
+    ? body.since
+    : (refs.length === 0 ? new Date(Date.now() - 48 * 3600 * 1000).toISOString() : "");
   let checked = 0;
   let created = 0;
   let alreadyQueued = 0;
