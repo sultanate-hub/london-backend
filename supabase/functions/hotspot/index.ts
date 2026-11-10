@@ -303,24 +303,24 @@ async function paystackVerify(ref: string): Promise<Record<string, any> | null> 
  * payment provider and create the order when the charge is successful.
  * Covers lost/failed webhooks and the historical silent-insert failures.
  */
-async function ensureQueued(ref: string, reason: string): Promise<boolean> {
-  if (!ref) return false;
+async function ensureQueued(ref: string, reason: string): Promise<"existing" | "created" | "missing"> {
+  if (!ref) return "missing";
   const supabase = getSupabase();
   const { data: existing } = await supabase
     .from("payment_queue").select("id").eq("transaction_id", ref).limit(1);
-  if (existing && existing.length > 0) return true;
+  if (existing && existing.length > 0) return "existing";
 
   // This deployment is Paystack; Squad recovery is not implemented.
-  if ((await getActiveProvider()) !== "paystack") return false;
+  if ((await getActiveProvider()) !== "paystack") return "missing";
 
   const tx = await paystackVerify(ref);
-  if (!tx) return false;
+  if (!tx) return "missing";
   const meta = (tx.metadata || {}) as Record<string, any>;
   const amountNaira = Number(tx.amount) / 100;
   const planCode = normalizePlan(meta.plan, amountNaira);
   if (!planCode) {
     await logActivity("reconcile", `Paid ref ${ref} has unknown plan/amount (${amountNaira})`, { ref, level: "error" });
-    return false;
+    return "missing";
   }
   await enqueue({
     ref,
@@ -331,7 +331,7 @@ async function ensureQueued(ref: string, reason: string): Promise<boolean> {
     provider: "Paystack",
   });
   await logActivity("reconcile", `Recovered paid transaction ${ref} via ${reason} -> ${planCode}`, { ref, level: "queue" });
-  return true;
+  return "created";
 }
 
 /**
@@ -345,15 +345,22 @@ async function reconcilePayments(req: Request): Promise<Response> {
   const since = typeof body?.since === "string" ? body.since : "";
   let checked = 0;
   let created = 0;
+  let alreadyQueued = 0;
   let stillMissing = 0;
 
-  for (const ref of refs) {
+  const track = (result: "existing" | "created" | "missing") => {
     checked++;
+    if (result === "created") created++;
+    else if (result === "existing") alreadyQueued++;
+    else stillMissing++;
+  };
+
+  for (const ref of refs) {
     try {
-      if (await ensureQueued(ref, "manual-reconcile")) created++;
-      else stillMissing++;
+      track(await ensureQueued(ref, "manual-reconcile"));
     } catch (e) {
       console.error(`reconcile ${ref} failed`, e);
+      checked++;
       stillMissing++;
     }
   }
@@ -362,27 +369,34 @@ async function reconcilePayments(req: Request): Promise<Response> {
     const secret = Deno.env.get("PAYSTACK_SECRET_KEY") || "";
     if (!secret) return json({ success: false, error: "PAYSTACK_SECRET_KEY not set" }, 500);
     try {
-      const res = await fetch(
-        `https://api.paystack.co/transaction?status=success&from=${encodeURIComponent(since)}&perPage=100`,
-        { headers: { Authorization: `Bearer ${secret}` } },
-      );
-      const payload = await res.json();
-      const list = Array.isArray(payload?.data) ? payload.data : [];
-      for (const tx of list) {
-        checked++;
-        try {
-          if (await ensureQueued(String(tx.reference), "sweep")) created++;
-        } catch (e) {
-          console.error(`sweep ${tx.reference} failed`, e);
+      let page = 1;
+      let pageCount = 1;
+      do {
+        const res = await fetch(
+          `https://api.paystack.co/transaction?status=success&from=${encodeURIComponent(since)}&perPage=100&page=${page}`,
+          { headers: { Authorization: `Bearer ${secret}` } },
+        );
+        const payload = await res.json();
+        const list = Array.isArray(payload?.data) ? payload.data : [];
+        pageCount = Number(payload?.meta?.pageCount) || 1;
+        for (const tx of list) {
+          try {
+            track(await ensureQueued(String(tx.reference), "sweep"));
+          } catch (e) {
+            console.error(`sweep ${tx.reference} failed`, e);
+            checked++;
+            stillMissing++;
+          }
         }
-      }
+        page++;
+      } while (page <= pageCount && page <= 25);
     } catch (e) {
       console.error("paystack sweep failed", e);
-      return json({ success: false, error: "Paystack sweep failed", checked, created }, 500);
+      return json({ success: false, error: "Paystack sweep failed", checked, created, already_queued: alreadyQueued, still_missing: stillMissing }, 500);
     }
   }
 
-  return json({ success: true, checked, created, still_missing: stillMissing });
+  return json({ success: true, checked, created, already_queued: alreadyQueued, still_missing: stillMissing });
 }
 
 function resolvePlan(raw?: string): { planCode: string; amount: number } | null {
@@ -568,7 +582,7 @@ async function checkStatus(ref: string): Promise<Response> {
   // lose, even after compensation has already been taken.
   if (!data) {
     try {
-      if (await ensureQueued(ref, "check-status")) {
+      if ((await ensureQueued(ref, "check-status")) === "created") {
         const again = await supabase
           .from("payment_queue").select(select).eq("transaction_id", ref).maybeSingle();
         data = again.data;
