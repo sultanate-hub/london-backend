@@ -204,28 +204,185 @@ async function initPayment(args: { email?: string; phone?: string; amount: numbe
 }
 
 // ---------- queue insertion ----------
+const VALID_PLANS = new Set(["24hr", "3d", "5d", "7d", "14d", "30d"]);
+
+/** Accept a plan code, a portal slug, or fall back to the charged amount. */
+function normalizePlan(raw: unknown, amountNaira: number): string {
+  const code = String(raw || "");
+  if (VALID_PLANS.has(code)) return code;
+  const byAmount = amountToPlan[amountNaira] || "";
+  return VALID_PLANS.has(byAmount) ? byAmount : "";
+}
+
+// 8 hex chars from crypto.randomBytes => ~4.3 billion usernames. The old
+// `dht` + last-5-digits-of-ms scheme collided (two real collisions are in
+// production: dht90172, dht96753) and a collision made the router skip
+// creation while still marking the payment processed.
+function newMikrotikUsername(): string {
+  return "dht" + hex(randBytes(4));
+}
+
+/**
+ * Insert a paid order into the provisioning queue.
+ *
+ * This MUST throw when the row was not written. The old version ignored the
+ * insert error, logged "Queued", and returned 200 to Paystack, so a failed
+ * write lost the customer permanently and Paystack never retried.
+ */
 async function enqueue(
   { ref, email, phone, planCode, mac, provider = "Squad" }: { ref: string; email?: string; phone?: string; planCode: string; mac?: string; provider?: string },
 ): Promise<void> {
   const supabase = getSupabase();
-  const username = `dht${Date.now().toString().slice(-5)}`;
-  const password = generatePassword();
-  const token = oneTimeToken();
-  const expiresAt = expiryFromPlan(planCode);
-  await supabase.from("payment_queue").insert({
-    transaction_id: ref,
-    customer_email: email || phone || "unknown@example.com",
-    customer_phone: phone || "",
-    plan: planCode,
-    mikrotik_username: username,
-    mikrotik_password: password,
-    mac_address: mac || "unknown",
-    status: "pending",
-    expires_at: expiresAt.toISOString(),
-    one_time_token: token,
+  if (!VALID_PLANS.has(planCode)) throw new Error(`invalid plan code: ${planCode}`);
+
+  let lastError = "unknown error";
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const username = newMikrotikUsername();
+    const password = generatePassword();
+    const token = oneTimeToken();
+    const expiresAt = expiryFromPlan(planCode);
+    const { error } = await supabase.from("payment_queue").insert({
+      transaction_id: ref,
+      customer_email: email || phone || "unknown@example.com",
+      customer_phone: phone || "",
+      plan: planCode,
+      mikrotik_username: username,
+      mikrotik_password: password,
+      mac_address: mac || "unknown",
+      status: "pending",
+      expires_at: expiresAt.toISOString(),
+      one_time_token: token,
+    });
+    if (!error) {
+      console.log(`🙋 Queued ${username} | ${planCode} | MAC:${mac} | Ref:${ref}`);
+      await logActivity("queue", `🙋 [${provider}] Queued ${username} | Plan: ${planCode} | MAC: ${mac} | Ref: ${ref}`, { ref, username, mac, level: "queue" });
+      return;
+    }
+    lastError = error.message || error.code || "insert failed";
+    // 23505 = unique_violation. If this reference is already queued, the
+    // desired end state already exists; anything else (pkey, token) is retried.
+    if (error.code === "23505") {
+      const { data: existing } = await supabase
+        .from("payment_queue").select("id").eq("transaction_id", ref).limit(1);
+      if (existing && existing.length > 0) {
+        console.log(`🙋 Ref ${ref} already queued`);
+        return;
+      }
+      continue;
+    }
+    console.error(`queue insert failed (attempt ${attempt + 1}) for ${ref}: ${lastError}`);
+    await new Promise((r) => setTimeout(r, 250 * (attempt + 1)));
+  }
+  throw new Error(`queue insert failed for ${ref}: ${lastError}`);
+}
+
+// ---------- payment reconciliation ----------
+/** Ask Paystack directly whether a reference was actually charged. */
+async function paystackVerify(ref: string): Promise<Record<string, any> | null> {
+  const secret = Deno.env.get("PAYSTACK_SECRET_KEY") || "";
+  if (!secret || !ref) return null;
+  try {
+    const res = await fetch(
+      `https://api.paystack.co/transaction/verify/${encodeURIComponent(ref)}`,
+      { headers: { Authorization: `Bearer ${secret}` } },
+    );
+    if (!res.ok) {
+      console.error(`paystack verify ${ref} -> HTTP ${res.status}`);
+      return null;
+    }
+    const body = await res.json();
+    if (body?.status === true && body?.data?.status === "success") return body.data;
+  } catch (e) {
+    console.error(`paystack verify ${ref} failed`, e);
+  }
+  return null;
+}
+
+/**
+ * Idempotent safety net: if a reference has no queue row, verify it with the
+ * payment provider and create the order when the charge is successful.
+ * Covers lost/failed webhooks and the historical silent-insert failures.
+ */
+async function ensureQueued(ref: string, reason: string): Promise<boolean> {
+  if (!ref) return false;
+  const supabase = getSupabase();
+  const { data: existing } = await supabase
+    .from("payment_queue").select("id").eq("transaction_id", ref).limit(1);
+  if (existing && existing.length > 0) return true;
+
+  // This deployment is Paystack; Squad recovery is not implemented.
+  if ((await getActiveProvider()) !== "paystack") return false;
+
+  const tx = await paystackVerify(ref);
+  if (!tx) return false;
+  const meta = (tx.metadata || {}) as Record<string, any>;
+  const amountNaira = Number(tx.amount) / 100;
+  const planCode = normalizePlan(meta.plan, amountNaira);
+  if (!planCode) {
+    await logActivity("reconcile", `Paid ref ${ref} has unknown plan/amount (${amountNaira})`, { ref, level: "error" });
+    return false;
+  }
+  await enqueue({
+    ref,
+    email: meta.phone ? "" : tx.customer?.email,
+    phone: String(meta.phone || tx.customer?.phone || ""),
+    planCode,
+    mac: String(meta.mac_address || "unknown"),
+    provider: "Paystack",
   });
-  console.log(`🙋 Queued ${username} | ${planCode} | MAC:${mac} | Ref:${ref}`);
-  await logActivity("queue", `🙋 [${provider}] Queued ${username} | Plan: ${planCode} | MAC: ${mac} | Ref: ${ref}`, { ref, username, mac, level: "queue" });
+  await logActivity("reconcile", `Recovered paid transaction ${ref} via ${reason} -> ${planCode}`, { ref, level: "queue" });
+  return true;
+}
+
+/**
+ * POST /api/reconcile-payments (API-key protected)
+ * Body: { refs?: string[], since?: ISO8601 }
+ * Creates queue rows for successful Paystack charges that are missing locally.
+ */
+async function reconcilePayments(req: Request): Promise<Response> {
+  const body = await req.json().catch(() => ({}));
+  const refs: string[] = Array.isArray(body?.refs) ? body.refs.map((r: unknown) => String(r)) : [];
+  const since = typeof body?.since === "string" ? body.since : "";
+  let checked = 0;
+  let created = 0;
+  let stillMissing = 0;
+
+  for (const ref of refs) {
+    checked++;
+    try {
+      if (await ensureQueued(ref, "manual-reconcile")) created++;
+      else stillMissing++;
+    } catch (e) {
+      console.error(`reconcile ${ref} failed`, e);
+      stillMissing++;
+    }
+  }
+
+  if (since) {
+    const secret = Deno.env.get("PAYSTACK_SECRET_KEY") || "";
+    if (!secret) return json({ success: false, error: "PAYSTACK_SECRET_KEY not set" }, 500);
+    try {
+      const res = await fetch(
+        `https://api.paystack.co/transaction?status=success&from=${encodeURIComponent(since)}&perPage=100`,
+        { headers: { Authorization: `Bearer ${secret}` } },
+      );
+      const payload = await res.json();
+      const list = Array.isArray(payload?.data) ? payload.data : [];
+      for (const tx of list) {
+        checked++;
+        try {
+          if (await ensureQueued(String(tx.reference), "sweep")) created++;
+        } catch (e) {
+          console.error(`sweep ${tx.reference} failed`, e);
+        }
+      }
+    } catch (e) {
+      console.error("paystack sweep failed", e);
+      return json({ success: false, error: "Paystack sweep failed", checked, created }, 500);
+    }
+  }
+
+  return json({ success: true, checked, created, still_missing: stillMissing });
 }
 
 function resolvePlan(raw?: string): { planCode: string; amount: number } | null {
@@ -399,11 +556,27 @@ async function markExpired(idRaw: string): Promise<Response> {
 
 async function checkStatus(ref: string): Promise<Response> {
   if (!ref) return json({ ready: false, message: "No reference provided" });
-  const { data } = await getSupabase()
+  const supabase = getSupabase();
+  const select = "mikrotik_username, mikrotik_password, plan, status, mac_address, expires_at";
+  let { data } = await supabase
     .from("payment_queue")
-    .select("mikrotik_username, mikrotik_password, plan, status, mac_address, expires_at")
+    .select(select)
     .eq("transaction_id", ref)
     .maybeSingle();
+  // No local row: the webhook was lost or its insert failed. Ask Paystack and
+  // create the order now. This is what makes a successful charge impossible to
+  // lose, even after compensation has already been taken.
+  if (!data) {
+    try {
+      if (await ensureQueued(ref, "check-status")) {
+        const again = await supabase
+          .from("payment_queue").select(select).eq("transaction_id", ref).maybeSingle();
+        data = again.data;
+      }
+    } catch (e) {
+      console.error(`check-status recovery failed for ${ref}`, e);
+    }
+  }
   if (!data) return json({ ready: false, message: "Payment not found. Please wait..." });
   if (data.status === "processed") {
     return json({
@@ -606,6 +779,10 @@ serve(async (req: Request) => {
       if (!checkApiKey(req)) return text("FORBIDDEN", 403);
       return await posReset();
     }
+    if (path === "/api/reconcile-payments" && method === "POST") {
+      if (!checkApiKey(req)) return text("FORBIDDEN", 403);
+      return await reconcilePayments(req);
+    }
     if (path === "/api/mikrotik-queue-text" && method === "GET") {
       if (!checkApiKey(req)) return text("FORBIDDEN", 403);
       return await mikrotikQueueText();
@@ -688,11 +865,16 @@ serve(async (req: Request) => {
         const meta = Body.meta || {};
         const mac = meta.mac_address || "unknown";
         const amountNaira = Number(Body.amount) / 100;
-        const planCode = meta.plan || amountToPlan[amountNaira];
+        const planCode = normalizePlan(meta.plan, amountNaira);
         if (!planCode) return json({ error: "Invalid amount" }, 400);
         const ex = await getSupabase().from("payment_queue").select("id").eq("transaction_id", ref).limit(1);
         if (ex.data && ex.data.length > 0) return json({ received: true });
-        await enqueue({ ref, email: meta.phone ? "" : Body.email, phone: meta.phone || "", planCode, mac, provider: "Squad" });
+        try {
+          await enqueue({ ref, email: meta.phone ? "" : Body.email, phone: meta.phone || "", planCode, mac, provider: "Squad" });
+        } catch (e) {
+          console.error("squad enqueue failed", e);
+          return json({ error: "Queue insert failed" }, 500);
+        }
         return json({ received: true });
       } catch (e) {
         console.error("squad webhook error", e);
@@ -717,11 +899,17 @@ serve(async (req: Request) => {
         const meta = d.metadata || {};
         const mac = meta.mac_address || "unknown";
         const amountNaira = Number(d.amount) / 100;
-        const planCode = meta.plan || amountToPlan[amountNaira];
+        const planCode = normalizePlan(meta.plan, amountNaira);
         if (!planCode) return json({ error: "Invalid amount" }, 400);
         const ex = await getSupabase().from("payment_queue").select("id").eq("transaction_id", ref).limit(1);
         if (ex.data && ex.data.length > 0) return json({ received: true });
-        await enqueue({ ref, email: meta.phone ? "" : d.customer?.email, phone: meta.phone || d.customer?.phone || "", planCode, mac, provider: "Paystack" });
+        try {
+          await enqueue({ ref, email: meta.phone ? "" : d.customer?.email, phone: meta.phone || d.customer?.phone || "", planCode, mac, provider: "Paystack" });
+        } catch (e) {
+          console.error("paystack enqueue failed", e);
+          // Non-2xx makes Paystack retry this webhook instead of dropping it.
+          return json({ error: "Queue insert failed" }, 500);
+        }
         return json({ received: true });
       } catch (e) {
         console.error("paystack webhook error", e);
